@@ -33,17 +33,24 @@ const searchPeers = computed(() => {
 		peers = peers.filter(x => x.restricted);
 	}
 
+	let result = peers;
 	if (deleteConfirmation.value || downloadConfirmation.value){
-		return peers.filter(x =>
+		result = peers.filter(x =>
 			selectedPeers.value.find(y => y === x.id)
 		)
-	}
-	if (selectPeersSearchInput.value.length > 0){
-		return peers.filter(x => {
+	} else if (selectPeersSearchInput.value.length > 0){
+		result = peers.filter(x => {
 			return x.id.includes(selectPeersSearchInput.value) || x.name.includes(selectPeersSearchInput.value)
 		})
 	}
-	return peers
+	
+	return result.slice().sort((a, b) => {
+		const aSelected = selectedPeers.value.includes(a.id);
+		const bSelected = selectedPeers.value.includes(b.id);
+		if (aSelected && !bSelected) return -1;
+		if (!aSelected && bSelected) return 1;
+		return 0;
+	});
 })
 
 watch(selectedPeers, () => {

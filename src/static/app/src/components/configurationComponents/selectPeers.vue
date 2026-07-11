@@ -194,7 +194,7 @@ const clearDownload = () => {
 							</span>
 							<span class="ms-auto d-flex align-items-center gap-2">
 								<span v-if="p.restricted" class="badge bg-warning text-dark">
-									<LocaleText :t="p.restricted_reason"></LocaleText>
+									<LocaleText :t="p.restricted_reason || 'Restricted'"></LocaleText>
 								</span>
 								<span v-if="downloadConfirmation">
 									<span class="spinner-border spinner-border-sm" role="status"

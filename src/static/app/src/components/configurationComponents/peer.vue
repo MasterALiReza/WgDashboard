@@ -79,7 +79,7 @@ export default {
 					<i class="bi-lock-fill me-2"></i>
 					<LocaleText t="Access Restricted"></LocaleText>
 				</div>
-				<span class="badge bg-warning text-dark ms-auto" v-if="Peer.restricted_reason"><LocaleText :t="Peer.restricted_reason"></LocaleText></span>
+				<span class="badge bg-warning text-dark ms-auto" v-if="Peer.restricted_reason || Peer.restricted"><LocaleText :t="Peer.restricted_reason || 'Restricted'"></LocaleText></span>
 			</div>
 		</div>
 		<div class="card-body pt-1" style="font-size: 0.9rem">

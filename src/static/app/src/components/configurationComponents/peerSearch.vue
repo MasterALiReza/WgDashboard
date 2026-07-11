@@ -40,10 +40,17 @@ export default {
 			searchStringTimeout: undefined,
 			showDisplaySettings: false,
 			showMoreSettings: false,
-			tagManager: false
+			statusFilters: {
+				"All": GetLocale("All"),
+				"Active": GetLocale("Active"),
+				"Restricted": GetLocale("Restricted")
+			}
 		}
 	},
 	methods: {
+		updateStatusFilter(filter){
+			this.wireguardConfigurationStore.Filter.StatusFilter = filter;
+		},
 		updateSort(sort){
 			fetchPost("/api/updateDashboardConfigurationItem", {
 				section: "Server",
@@ -158,21 +165,27 @@ export default {
 					</li>
 				</ul>
 			</div>
-			<div class="position-relative">
+			<div class="dropdown">
 				<button
-					@click="tagManager = !tagManager"
-					class="btn btn-sm w-100 text-primary-emphasis bg-primary-subtle rounded-3 border-1 border-primary-subtle  position-relative">
-
-					<i class="bi me-2 bi-tag"></i>
-					<LocaleText t="Tags"></LocaleText>
-
+					data-bs-toggle="dropdown"
+					class="btn btn-sm w-100 text-primary-emphasis bg-primary-subtle rounded-3 border-1 border-primary-subtle position-relative">
+					<i class="bi bi-funnel me-2"></i>
+					<LocaleText t="Status Filter"></LocaleText>
+					<span class="badge text-bg-primary ms-2">{{this.statusFilters[wireguardConfigurationStore.Filter.StatusFilter]}}</span>
 				</button>
-				<Transition name="slide-fade">
-					<PeerTag
-						@update="args => configuration.Info.PeerGroups = args"
-						@close="this.tagManager = false"
-						:configuration="configuration" v-if="this.tagManager"></PeerTag>
-				</Transition>
+				<ul class="dropdown-menu rounded-3">
+					<li v-for="(value, key) in this.statusFilters" >
+						<button class="dropdown-item d-flex align-items-center" @click="this.updateStatusFilter(key)">
+							<small>
+								{{ value }}
+							</small>
+							<small class="ms-auto">
+								<i class="bi bi-check-circle-fill"
+								   v-if="wireguardConfigurationStore.Filter.StatusFilter === key"></i>
+							</small>
+						</button>
+					</li>
+				</ul>
 			</div>
 			
 			<button class="btn btn-sm text-primary-emphasis bg-primary-subtle rounded-3 border-1 border-primary-subtle ms-lg-auto"

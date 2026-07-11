@@ -178,18 +178,20 @@ const firstAllowedIPCount = (allowed_ip) => {
 }
 
 const searchPeers = computed(() => {
-	const result = wireguardConfigurationStore.searchString ?
-		configurationPeers.value.filter(x => {
+	let result = configurationPeers.value;
+	
+	if (wireguardConfigurationStore.Filter.StatusFilter === "Active") {
+		result = result.filter(x => !x.restricted);
+	} else if (wireguardConfigurationStore.Filter.StatusFilter === "Restricted") {
+		result = result.filter(x => x.restricted);
+	}
+
+	result = wireguardConfigurationStore.searchString ?
+		result.filter(x => {
 			return (x.name.includes(wireguardConfigurationStore.searchString) ||
 				x.id.includes(wireguardConfigurationStore.searchString) ||
 				x.allowed_ip.includes(wireguardConfigurationStore.searchString))
-				&& !hiddenPeers.value.includes(x.id)
-				&& (
-					wireguardConfigurationStore.Filter.ShowAllPeersWhenHiddenTags || (!wireguardConfigurationStore.Filter.ShowAllPeersWhenHiddenTags && taggedPeers.value.includes(x.id))
-				)
-		}) : configurationPeers.value.filter(x => !hiddenPeers.value.includes(x.id) && (
-			wireguardConfigurationStore.Filter.ShowAllPeersWhenHiddenTags || (!wireguardConfigurationStore.Filter.ShowAllPeersWhenHiddenTags && taggedPeers.value.includes(x.id))
-		));
+		}) : result;
 
 	if (dashboardStore.Configuration.Server.dashboard_sort === "restricted"){
 		return result.sort((a, b) => {

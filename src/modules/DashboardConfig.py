@@ -121,7 +121,8 @@ class DashboardConfig:
             'keepalive': db.Integer,
             'notes': db.Text,
             'remote_endpoint': db.String(255),
-            'preshared_key': db.String(255)
+            'preshared_key': db.String(255),
+            'restricted_reason': db.String(255)
         }
 
         inspector = db.inspect(self.engine)

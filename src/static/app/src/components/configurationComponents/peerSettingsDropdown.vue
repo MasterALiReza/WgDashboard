@@ -99,8 +99,8 @@ export default {
 	<ul
 		:class="{'dropup': dropup}"
 		class="dropdown-menu mt-2 shadow-lg d-block rounded-3" id="peerDropdown" style="max-width: 200px">
-		<template v-if="!this.Peer.restricted">
-			<template v-if="!this.confirmDelete">
+		<template v-if="!this.confirmDelete">
+			<template v-if="!this.Peer.restricted">
 				<template v-if="this.Peer.status === 'running'">
 					<li style="font-size: 0.8rem; padding-left: var(--bs-dropdown-item-padding-x); padding-right: var(--bs-dropdown-item-padding-x);">
 						<span class="text-body d-flex">
@@ -199,39 +199,49 @@ export default {
 				</li>
 			</template>
 			<template v-else>
-				<li class="confirmDelete">
-					<p style="white-space: break-spaces" class="mb-2 d-block fw-bold">
-						<LocaleText t="Are you sure to delete this peer?"></LocaleText>
-					</p>
-					<div class="d-flex w-100 gap-2">
-						<button
-							@click="this.deletePeer()"
-							:disabled="this.deleteBtnDisabled"
-							class="flex-grow-1 ms-auto btn btn-sm bg-danger">
-							<LocaleText t="Yes"></LocaleText>
-						</button>
-						<button
-							:disabled="this.deleteBtnDisabled"
-							@click="this.confirmDelete = false"
-							class="flex-grow-1 btn btn-sm bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle">
-							<LocaleText t="No"></LocaleText>
-						</button>
-						
-					</div>
+				<li>
+					<a class="dropdown-item d-flex text-warning"
+
+					   @click="this.allowAccessPeer()"
+					   :class="{disabled: this.allowAccessBtnDisabled}"
+					   role="button">
+						<i class="me-auto bi bi-unlock"></i>
+						<LocaleText t="Allow Access" v-if="!this.allowAccessBtnDisabled"></LocaleText>
+						<LocaleText t="Allowing Access..." v-else></LocaleText>
+					</a>
+				</li>
+				<li>
+					<a class="dropdown-item d-flex fw-bold text-danger"
+					   @click="this.confirmDelete = true"
+					   :class="{disabled: this.deleteBtnDisabled}"
+					   role="button">
+						<i class="me-auto bi bi-trash"></i>
+						<LocaleText t="Delete" v-if="!this.deleteBtnDisabled"></LocaleText>
+						<LocaleText t="Deleting..." v-else></LocaleText>
+					</a>
 				</li>
 			</template>
 		</template>
 		<template v-else>
-			<li>
-				<a class="dropdown-item d-flex text-warning"
-
-				   @click="this.allowAccessPeer()"
-				   :class="{disabled: this.allowAccessBtnDisabled}"
-				   role="button">
-					<i class="me-auto bi bi-unlock"></i>
-					<LocaleText t="Allow Access" v-if="!this.allowAccessBtnDisabled"></LocaleText>
-					<LocaleText t="Allowing Access..." v-else></LocaleText>
-				</a>
+			<li class="confirmDelete">
+				<p style="white-space: break-spaces" class="mb-2 d-block fw-bold">
+					<LocaleText t="Are you sure to delete this peer?"></LocaleText>
+				</p>
+				<div class="d-flex w-100 gap-2">
+					<button
+						@click="this.deletePeer()"
+						:disabled="this.deleteBtnDisabled"
+						class="flex-grow-1 ms-auto btn btn-sm bg-danger">
+						<LocaleText t="Yes"></LocaleText>
+					</button>
+					<button
+						:disabled="this.deleteBtnDisabled"
+						@click="this.confirmDelete = false"
+						class="flex-grow-1 btn btn-sm bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle">
+						<LocaleText t="No"></LocaleText>
+					</button>
+					
+				</div>
 			</li>
 		</template>
 	</ul>

@@ -163,13 +163,19 @@ class PeerJobs:
                     runAction: bool = self.__runJob_Compare(x, y, job.Operator)
                     if runAction:
                         s = False
+                        
+                        if job.Field in ["total_receive", "total_sent", "total_data"]:
+                            reason = "Volume Limit Reached"
+                        else:
+                            reason = "Time Limit Reached"
+                            
                         if job.Action == "restrict":
-                            s, msg = c.restrictPeers([fp.id])
+                            s, msg = c.restrictPeers([fp.id], reason=reason)
                         elif job.Action == "delete":
                             s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
                         elif job.Action == "reset_total_data_usage":
                             s = fp.resetDataUsage("total")
-                            c.restrictPeers([fp.id])
+                            c.restrictPeers([fp.id], reason="Resetting data usage")
                             c.allowAccessPeers([fp.id])
                         if s is True:
                             self.JobLogger.log(job.JobID, s,

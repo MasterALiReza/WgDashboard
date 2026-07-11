@@ -4,6 +4,7 @@ import {computed, reactive, ref, useTemplateRef, watch} from "vue";
 import {fetchGet, fetchPost} from "@/utilities/fetch.js";
 import {useRoute} from "vue-router";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
+import {WireguardConfigurationsStore} from "@/stores/WireguardConfigurationsStore.js";
 
 const props = defineProps({
 	configurationPeers: Array
@@ -21,18 +22,28 @@ const togglePeers = (id) => {
 	}
 }
 
+const dashboardStore = DashboardConfigurationStore()
+const wireguardStore = WireguardConfigurationsStore()
+
 const searchPeers = computed(() => {
+	let peers = props.configurationPeers;
+	if (wireguardStore.Filter.StatusFilter === "Active") {
+		peers = peers.filter(x => !x.restricted);
+	} else if (wireguardStore.Filter.StatusFilter === "Restricted") {
+		peers = peers.filter(x => x.restricted);
+	}
+
 	if (deleteConfirmation.value || downloadConfirmation.value){
-		return props.configurationPeers.filter(x =>
+		return peers.filter(x =>
 			selectedPeers.value.find(y => y === x.id)
 		)
 	}
 	if (selectPeersSearchInput.value.length > 0){
-		return props.configurationPeers.filter(x => {
+		return peers.filter(x => {
 			return x.id.includes(selectPeersSearchInput.value) || x.name.includes(selectPeersSearchInput.value)
 		})
 	}
-	return props.configurationPeers
+	return peers
 })
 
 watch(selectedPeers, () => {
@@ -43,7 +54,6 @@ watch(selectedPeers, () => {
 })
 
 const route = useRoute()
-const dashboardStore = DashboardConfigurationStore()
 const emit = defineEmits(["refresh", "close"])
 const submitting = ref(false)
 const submitDelete = () => {
@@ -115,12 +125,21 @@ const clearDownload = () => {
 						<div class="d-flex w-100 align-items-center gap-2">
 							<div class="d-flex gap-3">
 								<a role="button"
-								   v-if="!downloadConfirmation && selectedPeers.length !== configurationPeers.map(x => x.id).length"
-								   @click="selectedPeers = configurationPeers.map(x => x.id)"
+								   v-if="!downloadConfirmation && selectedPeers.length !== searchPeers.map(x => x.id).length"
+								   @click="selectedPeers = searchPeers.map(x => x.id)"
 								   class="text-decoration-none text-body">
 									<small>
 										<i class="bi bi-check-all me-2"></i>
 										<LocaleText t="Select All"></LocaleText>
+									</small>
+								</a>
+								<a role="button"
+								   v-if="!downloadConfirmation && searchPeers.some(x => x.restricted) && searchPeers.filter(x => x.restricted).some(x => !selectedPeers.includes(x.id))"
+								   @click="selectedPeers = [...new Set([...selectedPeers, ...searchPeers.filter(x => x.restricted).map(x => x.id)])]"
+								   class="text-decoration-none text-body">
+									<small>
+										<i class="bi bi-slash-circle me-1"></i>
+										<LocaleText t="Select Restricted"></LocaleText>
 									</small>
 								</a>
 								<a role="button" class="text-decoration-none text-body"

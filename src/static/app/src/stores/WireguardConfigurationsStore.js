@@ -12,7 +12,8 @@ export const WireguardConfigurationsStore = defineStore('WireguardConfigurations
 		ConfigurationListInterval: undefined,
         Filter: {
             HiddenTags: [],
-            ShowAllPeersWhenHiddenTags: true
+            ShowAllPeersWhenHiddenTags: true,
+            StatusFilter: "All"
         },
         SortOptions: {
             Name: GetLocale("Name"),

@@ -104,7 +104,8 @@ class AmneziaConfiguration(WireguardConfiguration):
                 sqlalchemy.Column('keepalive', sqlalchemy.Integer),
                 sqlalchemy.Column('notes', sqlalchemy.Text),
                 sqlalchemy.Column('remote_endpoint', sqlalchemy.String(255)),
-                sqlalchemy.Column('preshared_key', sqlalchemy.String(255))
+                sqlalchemy.Column('preshared_key', sqlalchemy.String(255)),
+                sqlalchemy.Column('restricted_reason', sqlalchemy.String(255))
             ]
 
         if dbName is None:

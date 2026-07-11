@@ -38,6 +38,7 @@ class Peer:
         self.notes = tableData.get("notes", "")
         self.remote_endpoint = tableData["remote_endpoint"]
         self.preshared_key = tableData["preshared_key"]
+        self.restricted_reason = tableData.get("restricted_reason", "")
         self.jobs: list[PeerJob] = []
         self.ShareLink: list[PeerShareLink] = []
         self.getJobs()

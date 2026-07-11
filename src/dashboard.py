@@ -1451,7 +1451,7 @@ class Locale:
     def __init__(self):
         self.localePath = './static/locales/'
         self.activeLanguages = {}
-        with open(os.path.join(f"{self.localePath}supported_locales.json"), "r") as f:
+        with open(os.path.join(f"{self.localePath}supported_locales.json"), "r", encoding="utf-8") as f:
             self.activeLanguages = sorted(json.loads(''.join(f.readlines())), key=lambda x : x['lang_name'])
         
     def getLanguage(self) -> dict | None:

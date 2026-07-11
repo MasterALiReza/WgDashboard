@@ -269,7 +269,8 @@ class WireguardConfiguration:
                 sqlalchemy.Column('keepalive', sqlalchemy.Integer),
                 sqlalchemy.Column('notes', sqlalchemy.Text),
                 sqlalchemy.Column('remote_endpoint', sqlalchemy.String(255)),
-                sqlalchemy.Column('preshared_key', sqlalchemy.String(255))
+                sqlalchemy.Column('preshared_key', sqlalchemy.String(255)),
+                sqlalchemy.Column('restricted_reason', sqlalchemy.String(255))
             ]
 
         if dbName is None:
@@ -645,7 +646,7 @@ class WireguardConfiguration:
         self.getPeers()
         return True, "Allow access successfully"
 
-    def restrictPeers(self, listOfPublicKeys) -> tuple[bool, str]:
+    def restrictPeers(self, listOfPublicKeys, reason=None) -> tuple[bool, str]:
         numOfRestrictedPeers = 0
         numOfFailedToRestrictPeers = 0
         if not self.getStatus():
@@ -669,7 +670,8 @@ class WireguardConfiguration:
                         )
                         conn.execute(
                             self.peersRestrictedTable.update().values({
-                                "status": "stopped"
+                                "status": "stopped",
+                                "restricted_reason": reason
                             }).where(
                                 self.peersRestrictedTable.columns.id == pf.id
                             )
@@ -698,21 +700,41 @@ class WireguardConfiguration:
         numOfFailedToDeletePeers = 0
         deleted = []
         if not self.getStatus():
-            self.toggleConfiguration()
+            try:
+                self.toggleConfiguration()
+            except Exception:
+                pass
         with self.engine.begin() as conn:
             for p in listOfPublicKeys:
                 found, pf = self.searchPeer(p)
-                for job in pf.jobs:
-                    AllPeerJobs.deleteJob(job)
-                for shareLink in pf.ShareLink:
-                    AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
+                is_restricted = False
+                if not found:
+                    for restricted_peer in self.RestrictedPeers:
+                        if restricted_peer.id == p:
+                            found = True
+                            pf = restricted_peer
+                            is_restricted = True
+                            break
                 if found:
+                    for job in pf.jobs:
+                        AllPeerJobs.deleteJob(job)
+                    for shareLink in pf.ShareLink:
+                        AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
                     try:
-                        subprocess.check_output(f"{self.Protocol} set {self.Name} peer {pf.id} remove",
-                                                shell=True, stderr=subprocess.STDOUT)
+                        if not is_restricted:
+                            try:
+                                subprocess.check_output(f"{self.Protocol} set {self.Name} peer {pf.id} remove",
+                                                        shell=True, stderr=subprocess.STDOUT)
+                            except Exception:
+                                pass
                         conn.execute(
                             self.peersTable.delete().where(
                                 self.peersTable.columns.id == pf.id
+                            )
+                        )
+                        conn.execute(
+                            self.peersRestrictedTable.delete().where(
+                                self.peersRestrictedTable.columns.id == pf.id
                             )
                         )
                         deleted.append(pf.id)
@@ -743,7 +765,7 @@ class WireguardConfiguration:
             subprocess.check_output(command, stderr=subprocess.STDOUT)
 
             return True, None
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             current_app.logger.error(f"Failed to process command:\n{str(e)}")
             return False, "Internal server error"
 

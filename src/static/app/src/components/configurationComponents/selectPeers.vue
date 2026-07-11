@@ -173,7 +173,7 @@ const clearDownload = () => {
 					     style="overflow-y: scroll">
 						<button type="button" class="btn w-100 peerBtn text-start rounded-3 d-flex align-items-center gap-3"
 						        @click="togglePeers(p.id)"
-						        :class="{active: selectedPeers.find(x => x === p.id)}"
+						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning' : '']"
 						        :key="p.id"
 						        :disabled="deleteConfirmation || downloadConfirmation"
 						        ref="sp"
@@ -181,25 +181,30 @@ const clearDownload = () => {
 						        v-for="p in searchPeers">
 							<span v-if="!downloadConfirmation">
 									<i class="bi"
-									   :class="[ selectedPeers.find(x => x === p.id) ? 'bi-check-circle-fill':'bi-circle']"
+									   :class="[ selectedPeers.find(x => x === p.id) ? 'bi-check-circle-fill':'bi-circle', p.restricted && !selectedPeers.find(x => x === p.id) ? 'text-warning' : '']"
 									></i>
 								</span>
 							<span class="d-flex flex-column">
-								<small class="fw-bold">
+								<small class="fw-bold" :class="{'text-warning': p.restricted && !selectedPeers.find(x => x === p.id)}">
 									{{p.name ? p.name : "Untitled Peer"}}
 								</small>
 								<small class="text-muted">
 									<samp>{{p.id}}</samp>
 								</small>
 							</span>
-							<span v-if="downloadConfirmation" class="ms-auto">
-								<span class="spinner-border spinner-border-sm" role="status"
-								     v-if="!downloaded.success.find(x => x === p.id) && !downloaded.failed.find(x => x === p.id)">
+							<span class="ms-auto d-flex align-items-center gap-2">
+								<span v-if="p.restricted" class="badge bg-warning text-dark">
+									<LocaleText :t="p.restricted_reason"></LocaleText>
 								</span>
-								<i class="bi"
-								   v-else
-								   :class="[downloaded.failed.find(x => x === p.id) ? 'bi-x-circle-fill':'bi-check-circle-fill']"
-								></i>
+								<span v-if="downloadConfirmation">
+									<span class="spinner-border spinner-border-sm" role="status"
+										 v-if="!downloaded.success.find(x => x === p.id) && !downloaded.failed.find(x => x === p.id)">
+									</span>
+									<i class="bi"
+									   v-else
+									   :class="[downloaded.failed.find(x => x === p.id) ? 'bi-x-circle-fill':'bi-check-circle-fill']"
+									></i>
+								</span>
 							</span>
 						</button>
 					</div>

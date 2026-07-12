@@ -40,7 +40,7 @@ class PeerJobLogger:
                     )
                 )
         except Exception as e:
-            current_app.logger.error(f"Peer Job Log Error", e)
+            current_app.logger.error(f"Peer Job Log Error: {e}")
             return False
         return True
 
@@ -58,7 +58,7 @@ class PeerJobLogger:
                     logs.append(
                         Log(l.LogID, l.JobID, l.LogDate.strftime("%Y-%m-%d %H:%M:%S"), l.Status, l.Message))
         except Exception as e:
-            current_app.logger.error(f"Getting Peer Job Log Error", e)
+            current_app.logger.error(f"Getting Peer Job Log Error: {e}")
             return logs
         return logs
     

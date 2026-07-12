@@ -195,7 +195,7 @@ class DashboardWebHooks:
                     t.start()
                     current_app.logger.info(f"Requesting {i.PayloadURL}")
                 except Exception as e:
-                    current_app.logger.error(f"Requesting {i.PayloadURL} error", e)
+                    current_app.logger.error(f"Requesting {i.PayloadURL} error: {e}")
         except Exception as e:
             current_app.logger.error("Error when running WebHook")
 

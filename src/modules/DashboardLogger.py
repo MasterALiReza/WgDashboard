@@ -40,5 +40,5 @@ class DashboardLogger:
                 )
             return True
         except Exception as e:
-            current_app.logger.error(f"Access Log Error", e)
+            current_app.logger.error(f"Access Log Error: {e}")
             return False

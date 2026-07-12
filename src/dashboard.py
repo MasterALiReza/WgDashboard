@@ -104,7 +104,7 @@ def peerInformationBackgroundThread():
                                         c.logPeersHistoryEndpoint()
                             c.getRestrictedPeersList()
             except Exception as e:
-                app.logger.error(f"[WGDashboard] Background Thread #1 Error", e)
+                app.logger.error(f"[WGDashboard] Background Thread #1 Error: {e}")
 
         if delay == 6:
             delay = 1
@@ -122,7 +122,7 @@ def peerJobScheduleBackgroundThread():
                 AllPeerJobs.runJob()
                 time.sleep(180)
             except Exception as e:
-                app.logger.error("Background Thread #2 Error", e)
+                app.logger.error(f"Background Thread #2 Error: {e}")
 
 def gunicornConfig():
     _, app_ip = DashboardConfig.GetConfig("Server", "app_ip")
@@ -1015,7 +1015,7 @@ def API_addPeers(configName):
                     )
                     return ResponseObject(status=status, message=message, data=addedPeers)
         except Exception as e:
-            app.logger.error("Add peers failed", e)
+            app.logger.error(f"Add peers failed: {e}")
             return ResponseObject(False, f"Add peers failed.")
 
     return ResponseObject(False, "Configuration does not exist")

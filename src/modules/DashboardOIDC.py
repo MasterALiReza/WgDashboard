@@ -71,7 +71,7 @@ class DashboardOIDC:
                 if not all([tokens.get('access_token'), tokens.get('id_token')]):
                     return False, tokens.get('error_description', None)
             except Exception as e:
-                current_app.logger.error("Verify token failed", e)
+                current_app.logger.error(f"Verify token failed: {e}")
                 return False, str(e)
             
             access_token = tokens.get('access_token')

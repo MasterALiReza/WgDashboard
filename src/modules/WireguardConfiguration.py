@@ -1151,7 +1151,10 @@ class WireguardConfiguration:
         for p in self.Peers + self.getRestrictedPeersList():
             peerAllowedIP = p.allowed_ip.split(',')
             for pip in peerAllowedIP:
-                ppip = pip.strip().split('/')
+                pip = pip.strip()
+                if pip == "N/A":
+                    continue
+                ppip = pip.split('/')
                 if len(ppip) == 2:
                     try:
                         check = ipaddress.ip_network(ppip[0])
@@ -1182,7 +1185,10 @@ class WireguardConfiguration:
         for p in self.Peers + self.getRestrictedPeersList():
             peerAllowedIP = p.allowed_ip.split(',')
             for pip in peerAllowedIP:
-                ppip = pip.strip().split('/')
+                pip = pip.strip()
+                if pip == "N/A":
+                    continue
+                ppip = pip.split('/')
                 if len(ppip) == 2:
                     try:
                         check = ipaddress.ip_network(ppip[0])

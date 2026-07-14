@@ -21,7 +21,8 @@ from .Utilities import StringToBoolean, \
     ValidateDNSAddress, \
     ValidateEndpointAllowedIPs, \
     CheckAddress, \
-    CheckPeerKey
+    CheckPeerKey, \
+    ProcessLock
 from .WireguardConfigurationInfo import WireguardConfigurationInfo, PeerGroupsClass
 from .DashboardWebHooks import DashboardWebHooks
 
@@ -44,13 +45,11 @@ class WireguardConfiguration:
                  startup: bool = False,
                  wg: bool = True
                  ):
-        self.lock = threading.Lock()
         self.Peers = []
         self.__parser: configparser.ConfigParser = configparser.RawConfigParser(strict=False)
         self.__parser.optionxform = str
         self.__configFileModifiedTime = None
         self.Status: bool = False
-        self.Name: str = ""
         self.PrivateKey: str = ""
         self.PublicKey: str = ""
         self.ListenPort: str = ""
@@ -90,7 +89,10 @@ class WireguardConfiguration:
         else:
             self.Name = data["ConfigurationName"]
             self.configPath = os.path.join(self.__getProtocolPath(), f'{self.Name}.conf')
+        
+        self.lock = ProcessLock(f"/tmp/wgdashboard_{self.Name}.lock")
 
+        if name is None:
             for i in dir(self):
                 if str(i) in data.keys():
                     if isinstance(getattr(self, i), bool):

@@ -114,3 +114,30 @@ def ValidatePasswordStrength(password: str) -> tuple[bool, str] | tuple[bool, No
         return False, "Password must contain at least 1 special character from $&+,:;=?@#|'<>.-^*()%!~_-"
     
     return True, None
+
+import threading
+import os
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+class ProcessLock:
+    def __init__(self, lock_file):
+        self.lock_file = lock_file
+        self.lock_fd = None
+        self.thread_lock = threading.Lock()
+
+    def __enter__(self):
+        self.thread_lock.acquire()
+        if fcntl:
+            self.lock_fd = open(self.lock_file, "w")
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_fd and fcntl:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            self.lock_fd.close()
+            self.lock_fd = None
+        self.thread_lock.release()

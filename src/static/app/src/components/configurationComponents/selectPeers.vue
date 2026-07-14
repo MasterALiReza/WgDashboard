@@ -43,12 +43,16 @@ const searchPeers = computed(() => {
 			return x.id.includes(selectPeersSearchInput.value) || x.name.includes(selectPeersSearchInput.value)
 		})
 	}
-	
 	return result.slice().sort((a, b) => {
 		const aSelected = selectedPeers.value.includes(a.id);
 		const bSelected = selectedPeers.value.includes(b.id);
 		if (aSelected && !bSelected) return -1;
 		if (!aSelected && bSelected) return 1;
+		
+		const nameA = a.name ? a.name.toLowerCase() : "";
+		const nameB = b.name ? b.name.toLowerCase() : "";
+		if (nameA < nameB) return -1;
+		if (nameA > nameB) return 1;
 		return 0;
 	});
 })
@@ -141,8 +145,8 @@ const clearDownload = () => {
 									</small>
 								</a>
 								<a role="button"
-								   v-if="!downloadConfirmation && searchPeers.some(x => x.restricted) && searchPeers.filter(x => x.restricted).some(x => !selectedPeers.includes(x.id))"
-								   @click="selectedPeers = [...new Set([...selectedPeers, ...searchPeers.filter(x => x.restricted).map(x => x.id)])]"
+								   v-if="!downloadConfirmation && props.configurationPeers.some(x => x.restricted) && props.configurationPeers.filter(x => x.restricted).some(x => !selectedPeers.includes(x.id))"
+								   @click="selectedPeers = [...new Set([...selectedPeers, ...props.configurationPeers.filter(x => x.restricted).map(x => x.id)])]"
 								   class="text-decoration-none text-body">
 									<small>
 										<i class="bi bi-slash-circle me-1"></i>

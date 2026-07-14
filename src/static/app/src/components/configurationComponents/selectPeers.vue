@@ -49,6 +49,9 @@ const searchPeers = computed(() => {
 		if (aSelected && !bSelected) return -1;
 		if (!aSelected && bSelected) return 1;
 		
+		if (a.restricted && !b.restricted) return -1;
+		if (!a.restricted && b.restricted) return 1;
+		
 		const nameA = a.name ? a.name.toLowerCase() : "";
 		const nameB = b.name ? b.name.toLowerCase() : "";
 		if (nameA < nameB) return -1;
@@ -177,7 +180,7 @@ const clearDownload = () => {
 					     style="overflow-y: scroll">
 						<button type="button" class="btn w-100 peerBtn text-start rounded-3 d-flex align-items-center gap-3"
 						        @click="togglePeers(p.id)"
-						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning' : '']"
+						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning bg-warning-subtle text-dark' : '']"
 						        :key="p.id"
 						        :disabled="deleteConfirmation || downloadConfirmation"
 						        ref="sp"
@@ -189,15 +192,25 @@ const clearDownload = () => {
 									></i>
 								</span>
 							<span class="d-flex flex-column">
-								<small class="fw-bold" :class="{'text-warning': p.restricted && !selectedPeers.find(x => x === p.id)}">
+								<small class="fw-bold" :class="{'text-warning-emphasis': p.restricted && !selectedPeers.find(x => x === p.id)}">
 									{{p.name ? p.name : "Untitled Peer"}}
 								</small>
-								<small class="text-muted">
+								<small :class="[p.restricted ? 'text-dark' : 'text-muted']">
 									<samp>{{p.id}}</samp>
 								</small>
 							</span>
-							<span class="ms-auto d-flex align-items-center gap-2">
-								<span v-if="p.restricted" class="badge bg-warning text-dark">
+							<span class="ms-auto d-flex align-items-center gap-3">
+								<span class="d-flex gap-3 align-items-center" :class="[p.restricted ? 'text-dark' : 'text-muted']">
+									<span class="d-flex gap-1 align-items-center text-primary">
+										<i class="bi bi-arrow-down"></i>
+										<small><strong>{{(p.cumu_receive + p.total_receive).toFixed(4)}}</strong> GB</small>
+									</span>
+									<span class="d-flex gap-1 align-items-center text-success">
+										<i class="bi bi-arrow-up"></i>
+										<small><strong>{{(p.cumu_sent + p.total_sent).toFixed(4)}}</strong> GB</small>
+									</span>
+								</span>
+								<span v-if="p.restricted" class="badge bg-warning text-dark border border-warning-subtle">
 									<LocaleText :t="p.restricted_reason || 'Restricted'"></LocaleText>
 								</span>
 								<span v-if="downloadConfirmation">

@@ -10,16 +10,9 @@ class SystemStatus:
         self.NetworkInterfaces = NetworkInterfaces()
         self.Processes = Processes()
     def toJson(self):
-        process = [
-            threading.Thread(target=self.CPU.getCPUPercent), 
-            threading.Thread(target=self.CPU.getPerCPUPercent),
-            threading.Thread(target=self.NetworkInterfaces.getData)
-        ]
-        for p in process:
-            p.start()
-        for p in process:
-            p.join()
-        
+        self.CPU.getCPUPercent()
+        self.CPU.getPerCPUPercent()
+        self.NetworkInterfaces.getData()
         
         return {
             "CPU": self.CPU,
@@ -38,21 +31,27 @@ class CPU:
     def __init__(self):
         self.cpu_percent: float = 0
         self.cpu_percent_per_cpu: list[float] = []
+        self.last_update = 0
         
     def getCPUPercent(self):
         try:
-            self.cpu_percent = psutil.cpu_percent(interval=1)
+            now = time.time()
+            if now - self.last_update > 0.5:
+                self.cpu_percent = psutil.cpu_percent(interval=None)
         except Exception as e:
             current_app.logger.error(f"Get CPU Percent error: {e}")
     
     def getPerCPUPercent(self):
         try:
-            self.cpu_percent_per_cpu = psutil.cpu_percent(interval=1, percpu=True)
+            now = time.time()
+            if now - self.last_update > 0.5:
+                self.cpu_percent_per_cpu = psutil.cpu_percent(interval=None, percpu=True)
+                self.last_update = now
         except Exception as e:
             current_app.logger.error(f"Get Per CPU Percent error: {e}")
     
     def toJson(self):
-        return self.__dict__
+        return {"cpu_percent": self.cpu_percent, "cpu_percent_per_cpu": self.cpu_percent_per_cpu}
 
 class Memory:
     def __init__(self, memoryType: str):
@@ -112,6 +111,8 @@ class Disk:
 class NetworkInterfaces:
     def __init__(self):
         self.interfaces = {}
+        self.last_network = None
+        self.last_time = None
         
     def getInterfacePriorities(self):
         if shutil.which("ip"):
@@ -128,23 +129,42 @@ class NetworkInterfaces:
         return {}
 
     def getData(self):
-        self.interfaces.clear()
         try:
-            network = psutil.net_io_counters(pernic=True, nowrap=True)
-            for i in network.keys():
-                self.interfaces[i] = network[i]._asdict()
-            time.sleep(1)
-            network = psutil.net_io_counters(pernic=True, nowrap=True)
-            for i in network.keys():
-                self.interfaces[i]['realtime'] = {
-                    'sent': round((network[i].bytes_sent - self.interfaces[i]['bytes_sent']) / 1024 / 1024, 4),
-                    'recv': round((network[i].bytes_recv - self.interfaces[i]['bytes_recv']) / 1024 / 1024, 4)
-                }
+            current_network = psutil.net_io_counters(pernic=True, nowrap=True)
+            current_time = time.time()
+
+            if self.last_network is None or self.last_time is None:
+                self.last_network = current_network
+                self.last_time = current_time
+                for i in current_network.keys():
+                    self.interfaces[i] = current_network[i]._asdict()
+                    self.interfaces[i]['realtime'] = {'sent': 0.0, 'recv': 0.0}
+                return
+
+            time_diff = current_time - self.last_time
+            if time_diff < 0.5:
+                return # Skip update if called too frequently
+                
+            for i in current_network.keys():
+                self.interfaces[i] = current_network[i]._asdict()
+                if i in self.last_network:
+                    sent_diff = current_network[i].bytes_sent - self.last_network[i].bytes_sent
+                    recv_diff = current_network[i].bytes_recv - self.last_network[i].bytes_recv
+                    
+                    self.interfaces[i]['realtime'] = {
+                        'sent': round((sent_diff / 1024 / 1024) / time_diff, 4),
+                        'recv': round((recv_diff / 1024 / 1024) / time_diff, 4)
+                    }
+                else:
+                    self.interfaces[i]['realtime'] = {'sent': 0.0, 'recv': 0.0}
+                    
+            self.last_network = current_network
+            self.last_time = current_time
         except Exception as e:
             current_app.logger.error(f"Get network error: {e}")
 
     def toJson(self):
-        return self.interfaces
+        return {k: {key: val for key, val in v.items() if key != 'last_network'} for k, v in self.interfaces.items()}
 
 class Process:
     def __init__(self, name, command, pid, percent):

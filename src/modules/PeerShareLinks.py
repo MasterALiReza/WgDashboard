@@ -38,12 +38,10 @@ class PeerShareLinks:
 
 
     def getLink(self, Configuration: str, Peer: str) -> list[PeerShareLink]:
-        self.__getSharedLinks()
-        return list(filter(lambda x : x.Configuration == Configuration and x.Peer == Peer, self.Links))
+        return list(filter(lambda x : x.Configuration == Configuration and x.Peer == Peer and (x.ExpireDate is None or x.ExpireDate > datetime.now()), self.Links))
 
     def getLinkByID(self, ShareID: str) -> list[PeerShareLink]:
-        self.__getSharedLinks()
-        return list(filter(lambda x : x.ShareID == ShareID, self.Links))
+        return list(filter(lambda x : x.ShareID == ShareID and (x.ExpireDate is None or x.ExpireDate > datetime.now()), self.Links))
 
     def addLink(self, Configuration: str, Peer: str, ExpireDate: datetime = None) -> tuple[bool, str]:
         try:

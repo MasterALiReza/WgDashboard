@@ -1216,27 +1216,35 @@ class WireguardConfiguration:
         return True, availableAddress
 
     def getRealtimeTrafficUsage(self):
+        import time
+        now = time.time()
         stats = psutil.net_io_counters(pernic=True, nowrap=True)
         if self.Name in stats.keys():
             stat = stats[self.Name]
-            recv1 = stat.bytes_recv
-            sent1 = stat.bytes_sent
-            time.sleep(1)
-            stats = psutil.net_io_counters(pernic=True, nowrap=True)
-            if self.Name in stats.keys():
-                stat = stats[self.Name]
-                recv2 = stat.bytes_recv
-                sent2 = stat.bytes_sent
-                net_in = round((recv2 - recv1) / 1024 / 1024, 3)
-                net_out = round((sent2 - sent1) / 1024 / 1024, 3)
-                return {
-                    "sent": net_out,
-                    "recv": net_in
-                }
-            else:
-                return { "sent": 0, "recv": 0 }
+            if not hasattr(self, 'last_traffic_time') or not hasattr(self, 'last_traffic_stats'):
+                self.last_traffic_time = now
+                self.last_traffic_stats = stat
+                return { "sent": 0.0, "recv": 0.0 }
+            
+            time_diff = now - self.last_traffic_time
+            if time_diff <= 0:
+                time_diff = 1.0
+                
+            recv_diff = stat.bytes_recv - self.last_traffic_stats.bytes_recv
+            sent_diff = stat.bytes_sent - self.last_traffic_stats.bytes_sent
+            
+            net_in = round((recv_diff / 1024 / 1024) / time_diff, 3)
+            net_out = round((sent_diff / 1024 / 1024) / time_diff, 3)
+            
+            self.last_traffic_time = now
+            self.last_traffic_stats = stat
+            
+            return {
+                "sent": max(0.0, net_out),
+                "recv": max(0.0, net_in)
+            }
         else:
-            return { "sent": 0, "recv": 0 }
+            return { "sent": 0.0, "recv": 0.0 }
     
     '''
     Manager WireGuard Configuration Information

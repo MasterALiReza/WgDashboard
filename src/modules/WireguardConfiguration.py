@@ -1360,7 +1360,7 @@ class WireguardConfiguration:
                 db.execute(
                     self.peersTransferTable.delete()
             )
-            with self.engine.connect() as conn:
+            with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 if conn.dialect.name == 'sqlite':
                     print("[WGDashboard] SQLite Vacuuming Database")
                     conn.execute(sqlalchemy.text('VACUUM;'))
@@ -1374,7 +1374,7 @@ class WireguardConfiguration:
                 db.execute(
                     self.peersHistoryEndpointTable.delete()
                 )
-            with self.engine.connect() as conn:
+            with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 if conn.dialect.name == 'sqlite':
                     print("[WGDashboard] SQLite Vacuuming Database")
                     conn.execute(sqlalchemy.text('VACUUM;'))

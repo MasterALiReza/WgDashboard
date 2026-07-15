@@ -1,6 +1,18 @@
 import configparser
 import os
 from sqlalchemy_utils import database_exists, create_database
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    # Enable WAL mode for SQLite to dramatically improve concurrency and prevent 'database is locked' errors.
+    # Check if the connection is a sqlite connection by inspecting its class name or type
+    if dbapi_connection.__class__.__module__ == "sqlite3":
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)
@@ -15,7 +27,7 @@ def ConnectionString(database) -> str:
     elif parser.get("Database", "type") == "mysql":
         cn = f'mysql+pymysql://{parser.get("Database", "username")}:{parser.get("Database", "password")}@{parser.get("Database", "host")}/{database}'
     else:
-        cn = f'sqlite:///{os.path.join(sqlitePath, f"{database}.db")}'
+        cn = f'sqlite:///{os.path.join(sqlitePath, f"{database}.db")}?timeout=60'
     try:
         if not database_exists(cn):
             create_database(cn)

@@ -211,11 +211,7 @@ class PeerJobs:
                 self.JobLogger.deleteLogs(JobID=job.get('JobID'))
                 self.JobLogger.log(job.get('JobID'), Message=f"Job is removed due to being stale.")
         
-        with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            if init and conn.dialect.name == 'sqlite':
-                print("[WGDashboard] SQLite Vacuuming PeerJobs Database")
-                self.JobLogger.vacuum()
-                conn.execute(sqlalchemy.text('VACUUM;'))
+
 
     def __runJob_Compare(self, x: float | datetime, y: float | datetime, operator: str):
         if operator == "eq":

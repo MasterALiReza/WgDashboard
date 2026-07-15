@@ -12,14 +12,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
-        dbapi_connection.isolation_level = None
-
-@event.listens_for(Engine, "begin")
-def do_begin(conn):
-    opts = conn._execution_options if hasattr(conn, '_execution_options') else {}
-    if conn.engine.dialect.name == "sqlite" and opts.get("isolation_level") != "AUTOCOMMIT":
-        conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)

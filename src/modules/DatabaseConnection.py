@@ -13,6 +13,12 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
+        dbapi_connection.isolation_level = None
+
+@event.listens_for(Engine, "begin")
+def do_begin(conn):
+    if conn.engine.dialect.name == "sqlite":
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)

@@ -1,11 +1,18 @@
-import dashboard
 import os
+import configparser
 from datetime import datetime
 global sqldb, cursor, DashboardConfig, WireguardConfigurations, AllPeerJobs, JobLogger, Dash
-app_host, app_port = dashboard.gunicornConfig()
+
+def get_bind():
+    parser = configparser.ConfigParser(strict=False)
+    parser.read_file(open('wg-dashboard.ini', "r+"))
+    return f"{parser.get('Server', 'app_ip')}:{parser.get('Server', 'app_port')}"
+
+app_host, app_port = get_bind().split(":")
 date = datetime.today().strftime('%Y_%m_%d_%H_%M_%S')
 
 def post_worker_init(worker):
+    import dashboard
     dashboard.startThreads()
     dashboard.DashboardPlugins.startThreads()
 

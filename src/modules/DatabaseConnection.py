@@ -17,7 +17,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 
 @event.listens_for(Engine, "begin")
 def do_begin(conn):
-    if conn.engine.dialect.name == "sqlite":
+    opts = conn._execution_options if hasattr(conn, '_execution_options') else {}
+    if conn.engine.dialect.name == "sqlite" and opts.get("isolation_level") != "AUTOCOMMIT":
         conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 def ConnectionString(database) -> str:    

@@ -120,9 +120,9 @@ def peerJobScheduleBackgroundThread():
         while True:
             try:
                 AllPeerJobs.runJob()
-                time.sleep(180)
             except Exception as e:
                 app.logger.error(f"Background Thread #2 Error: {e}")
+            time.sleep(180)
 
 def gunicornConfig():
     _, app_ip = DashboardConfig.GetConfig("Server", "app_ip")

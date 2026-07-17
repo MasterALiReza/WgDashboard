@@ -379,6 +379,14 @@ install_wgd(){
 	else
 			printf "[WGDashboard] %s Found existing ssl-tls.ini\n" "$heavy_checkmark"
 	fi
+	
+	if [ ! -f "wg-dashboard.ini" ]
+		then
+			"$venv_python" -c "from modules.DashboardConfig import DashboardConfig; DashboardConfig()" >> ./log/install.txt 2>&1
+			printf "[WGDashboard] %s Created wg-dashboard.ini\n" "$heavy_checkmark"
+	else
+			printf "[WGDashboard] %s Found existing wg-dashboard.ini\n" "$heavy_checkmark"
+	fi
     printf "[WGDashboard] %s WGDashboard installed successfully!\n" "$heavy_checkmark"
     printf "[WGDashboard] Enter ./wgd.sh start to start the dashboard\n"
 }

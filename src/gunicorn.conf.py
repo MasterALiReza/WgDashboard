@@ -4,6 +4,9 @@ from datetime import datetime
 global sqldb, cursor, DashboardConfig, WireguardConfigurations, AllPeerJobs, JobLogger, Dash
 
 def get_bind():
+    if not os.path.exists('wg-dashboard.ini'):
+        from modules.DashboardConfig import DashboardConfig
+        DashboardConfig()
     parser = configparser.ConfigParser(strict=False)
     parser.read_file(open('wg-dashboard.ini', "r+"))
     return f"{parser.get('Server', 'app_ip')}:{parser.get('Server', 'app_port')}"

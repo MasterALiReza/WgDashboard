@@ -1,0 +1,7 @@
+id_admin	username	password	rule
+5727231943	5727231943	$2y$12$oBLe5us2s7QEj5mp/SMLAuWaKDMR9EXjV.kBZwGFmtdJrs2DHj3ci	administrator
+680561287	680561287	$2y$12$sKWkNm0Kq7OzLj1fpAeRLuUPzT90PsFR56STSil/8MGLRYB7PGunq	administrator
+8804766809	8804766809	$2y$12$8jMmeF5.K2u6H5.KrepPmuwPj4q.9dxWNb.dhHqVXKyDyLCjdjQlO	administrator
+id	name	status
+1	وایرگارد کالاف موبایل 🇮🇷	active
+2	وایرگارد تمامی بازی‌ها 🇹🇷	active

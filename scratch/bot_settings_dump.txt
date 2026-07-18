@@ -1,0 +1,20 @@
+Bot_Status	roll_Status	get_number	iran_number	NotUser	Channel_Report	limit_usertest_all	affiliatesstatus	affiliatespercentage	removedayc	showcard	numbercount	statusnewuser	statusagentrequest	statuscategory	statusterffh	volumewarn	inlinebtnmain	verifystart	id_support	statusnamecustom	statuscategorygenral	statussupportpv	agentreqprice	bulkbuy	on_hold_day	cronvolumere	verifybucodeuser	scorestatus	Lottery_prize	wheelـluck	wheelـluck_price	btn_status_extned	daywarn	categoryhelp	linkappstatus	wheelagent	Lotteryagent	statusfirstwheel	statuslimitchangeloc	Debtsettlement	Dice	keyboardmain	statusnoteforf	statuscopycart	timeauto_not_verify	status_keyboard_config	cron_status	limitnumber	status_manual_config
+botstatuson	rolleon	offAuthenticationphone	offAuthenticationiran	offnotuser	-1003617185326	1	onaffiliates	10	0	1	0	onnewuser	onrequestagent	offcategory	offterffh	2	oninline	offverify		offnamecustom	offcategorys	offpvsupport	990000	onbulk	4	5	offverify	0	{"one":"0","tow":"0","theree":"0"}	1	0	0	2	0	1	0	0	1	1	0	0	{"keyboard":[[{"text":"text_extend","style":"primary"},{"text":"text_sell","style":"success"}],[{"text":"text_Purchased_services","style":"danger"}],[{"text":"text_usertest","style":"primary"},{"text":"accountwallet","style":"primary"}],[{"text":"text_support","style":"primary"},{"text":"text_affiliates","style":"primary"}],[{"text":"panelAdmin"},{"text":"requestAgent","style":"primary"}]]}	0	1	1	0	{"day":true,"volume":true,"remove":false,"remove_volume":false,"test":false,"on_hold":false,"uptime_node":false,"uptime_panel":false}	{"free":100,"all":100}	1
+Namevalue	value
+backserviecstatus	on
+chashbackextend	0
+chashbackextend_agent	{"n":0,"n2":0}
+configshow	onconfig
+customtimepricef	4000
+customtimepricen	4000
+customtimepricen2	4000
+customvolmef	4000
+customvolmen	4000
+customvolmen2	4000
+minbalancebuybulk	5
+statuschangeservice	onstatus
+statusdirectpabuy	ondirectbuy
+statusdisorder	offdisorder
+statusextra	offextra
+statusshowprice	offshowprice
+statustimeextra	ontimeextraa

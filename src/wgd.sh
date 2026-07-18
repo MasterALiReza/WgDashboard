@@ -453,11 +453,21 @@ gunicorn_stop () {
 
 start_wgd () {
 	_checkWireguard
-    gunicorn_start
+	if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+		printf "[WGDashboard] Managed by systemd. Starting wg-dashboard.service...\n"
+		sudo systemctl start wg-dashboard
+		printf "[WGDashboard] WGDashboard service started successfully.\n"
+	else
+		gunicorn_start
+	fi
 }
 
 stop_wgd() {
-	if test -f "$PID_FILE"; then
+	if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+		printf "[WGDashboard] Managed by systemd. Stopping wg-dashboard.service...\n"
+		sudo systemctl stop wg-dashboard
+		printf "[WGDashboard] WGDashboard service stopped successfully.\n"
+	elif test -f "$PID_FILE"; then
 		gunicorn_stop
 	else
 		kill "$(ps aux | grep "[p]ython3 $app_name" | awk '{print $2}')"
@@ -539,7 +549,9 @@ else
 	elif [ "$1" = "install" ]; then
 		install_wgd
 	elif [ "$1" = "restart" ]; then
-		if check_wgd_status; then
+		if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+			sudo systemctl restart wg-dashboard
+		elif check_wgd_status; then
 			stop_wgd
 			start_wgd
 		else

@@ -4,6 +4,8 @@ WireGuard Configuration
 from typing import Any
 
 import jinja2
+from jinja2.sandbox import SandboxedEnvironment
+_jinja_env = SandboxedEnvironment()
 import sqlalchemy, random, shutil, configparser, ipaddress, os, subprocess, time, re, uuid, psutil, traceback, threading
 from zipfile import ZipFile
 from datetime import datetime, timedelta
@@ -337,14 +339,29 @@ class WireguardConfiguration:
         if not restore:
             self.__dropDatabase()
         self.createDatabase()
+        allowed_tables = [
+            self.Name,
+            f"{self.Name}_restrict_access",
+            f"{self.Name}_deleted",
+            f"{self.Name}_transfer",
+            f"{self.Name}_history_endpoint"
+        ]
+        escaped_tables = "|".join(re.escape(t) for t in allowed_tables)
+        allowed_insert_pattern = re.compile(
+            rf'^INSERT\s+INTO\s+["`]?({escaped_tables})["`]?\s*\(',
+            re.IGNORECASE
+        )
         if not os.path.exists(sqlFilePath):
             return False
         with self.engine.begin() as conn:
             with open(sqlFilePath, 'r') as f:
                 for l in f.readlines():
-                    l = l.rstrip("\n")
+                    l = l.rstrip("\n").strip()
                     if len(l) > 0:
-                        conn.execute(sqlalchemy.text(l))
+                        if allowed_insert_pattern.match(l):
+                            conn.execute(sqlalchemy.text(l))
+                        else:
+                            current_app.logger.warning(f"Unsafe SQL line skipped during import: {l[:100]}")
         return True
 
     def __getPublicKey(self) -> str:
@@ -483,44 +500,56 @@ class WireguardConfiguration:
         self.Peers = tmpList
     
     def logPeersTraffic(self):
-        with self.engine.begin() as conn:
-            for tempPeer in self.Peers:
-                if tempPeer.status == "running":
-                    conn.execute(
-                        self.peersTransferTable.insert().values({
-                            "id": tempPeer.id,
-                            "total_receive": tempPeer.total_receive,
-                            "total_sent": tempPeer.total_sent,
-                            "total_data": tempPeer.total_data,
-                            "cumu_sent": tempPeer.cumu_sent,
-                            "cumu_receive": tempPeer.cumu_receive,
-                            "cumu_data": tempPeer.cumu_data,
-                            "time": datetime.now()
-                        })
-                    )
+        inserts = []
+        now = datetime.now()
+        for tempPeer in self.Peers:
+            if tempPeer.status == "running":
+                inserts.append({
+                    "id": tempPeer.id,
+                    "total_receive": tempPeer.total_receive,
+                    "total_sent": tempPeer.total_sent,
+                    "total_data": tempPeer.total_data,
+                    "cumu_sent": tempPeer.cumu_sent,
+                    "cumu_receive": tempPeer.cumu_receive,
+                    "cumu_data": tempPeer.cumu_data,
+                    "time": now
+                })
+        if len(inserts) > 0:
+            with self.engine.begin() as conn:
+                conn.execute(self.peersTransferTable.insert(), inserts)
     
     def logPeersHistoryEndpoint(self):
-        with self.engine.begin() as conn:
-            for tempPeer in self.Peers:
-                if tempPeer.status == "running":
-                    endpoint = tempPeer.endpoint.rsplit(":", 1)    
-                    if len(endpoint) == 2 and len(endpoint[0]) > 0:
-                        exist = conn.execute(
-                            self.peersHistoryEndpointTable.select().where(
-                                sqlalchemy.and_(
-                                    self.peersHistoryEndpointTable.c.id == tempPeer.id,
-                                    self.peersHistoryEndpointTable.c.endpoint == endpoint[0]
-                                )
-                            )
-                        ).mappings().fetchone()
-                        if not exist:
-                            conn.execute(
-                                self.peersHistoryEndpointTable.insert().values({
-                                    "id": tempPeer.id,
-                                    "endpoint": endpoint[0],
-                                    "time": datetime.now()
-                                })
-                            )
+        peer_ids = [tempPeer.id for tempPeer in self.Peers if tempPeer.status == "running"]
+        if not peer_ids:
+            return
+            
+        existing = set()
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                self.peersHistoryEndpointTable.select().where(
+                    self.peersHistoryEndpointTable.c.id.in_(peer_ids)
+                )
+            ).mappings().fetchall()
+            for r in rows:
+                existing.add((r['id'], r['endpoint']))
+                
+        inserts = []
+        now = datetime.now()
+        for tempPeer in self.Peers:
+            if tempPeer.status == "running":
+                endpoint = tempPeer.endpoint.rsplit(":", 1)    
+                if len(endpoint) == 2 and len(endpoint[0]) > 0:
+                    if (tempPeer.id, endpoint[0]) not in existing:
+                        inserts.append({
+                            "id": tempPeer.id,
+                            "endpoint": endpoint[0],
+                            "time": now
+                        })
+                        existing.add((tempPeer.id, endpoint[0]))
+                        
+        if len(inserts) > 0:
+            with self.engine.begin() as conn:
+                conn.execute(self.peersHistoryEndpointTable.insert(), inserts)
                           
     def addPeers(self, peers: list) -> tuple[bool, list, str]:
         result = {
@@ -568,18 +597,19 @@ class WireguardConfiguration:
                 presharedKeyExist = len(p['preshared_key']) > 0
                 rd = random.Random()
                 uid = str(uuid.UUID(int=rd.getrandbits(128), version=4))
-                if presharedKeyExist:
-                    with open(uid, "w+") as f:
-                        f.write(p['preshared_key'])
+                try:
+                    if presharedKeyExist:
+                        with open(uid, "w+") as f:
+                            f.write(p['preshared_key'])
 
-                command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                subprocess.check_output(command, stderr=subprocess.STDOUT)
-
-                if presharedKeyExist:
-                    os.remove(uid)
+                    command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                finally:
+                    if presharedKeyExist and os.path.exists(uid):
+                        os.remove(uid)
 
             command = [f"{self.Protocol}-quick", "save", self.Name]
-            subprocess.check_output(command, stderr=subprocess.STDOUT)
+            subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
             self.getPeers()
             for p in peers:
@@ -596,9 +626,15 @@ class WireguardConfiguration:
         return True, result['peers'], ""
 
     def searchPeer(self, publicKey):
-        for i in self.Peers:
-            if i.id == publicKey:
-                return True, i
+        if not publicKey or not CheckPeerKey(publicKey):
+            return False, None
+        if not hasattr(self, '_peers_dict_cache_id') or self._peers_dict_cache_id != id(self.Peers):
+            self._peers_dict = {p.id: p for p in self.Peers}
+            self._peers_dict_cache_id = id(self.Peers)
+            
+        p = self._peers_dict.get(publicKey)
+        if p is not None:
+            return True, p
         return False, None
 
     def allowAccessPeers(self, listOfPublicKeys) -> tuple[bool, str]:
@@ -626,10 +662,6 @@ class WireguardConfiguration:
                     presharedKeyExist = len(restrictedPeer['preshared_key']) > 0
                     rd = random.Random()
                     uid = str(uuid.UUID(int=rd.getrandbits(128), version=4))
-                    if presharedKeyExist:
-                        with open(uid, "w+") as f:
-                            f.write(restrictedPeer['preshared_key'])
-
                     newAllowedIPs = restrictedPeer['allowed_ip'].replace(" ", "")
                     if not CheckAddress(newAllowedIPs):
                         return False, "Allowed IPs entry format is incorrect"
@@ -637,10 +669,16 @@ class WireguardConfiguration:
                     if not CheckPeerKey(restrictedPeer["id"]):
                         return False, "Peer key format is incorrect"
 
-                    command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                    subprocess.check_output(command, stderr=subprocess.STDOUT)
+                    try:
+                        if presharedKeyExist:
+                            with open(uid, "w+") as f:
+                                f.write(restrictedPeer['preshared_key'])
 
-                    if presharedKeyExist: os.remove(uid)
+                        command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                    finally:
+                        if presharedKeyExist and os.path.exists(uid):
+                            os.remove(uid)
                 else:
                     return False, "Failed to allow access of peer " + i
         if not self.__wgSave():
@@ -660,7 +698,7 @@ class WireguardConfiguration:
                 if found:
                     try:
                         command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
-                        subprocess.check_output(command, stderr=subprocess.STDOUT)
+                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
                         conn.execute(
                             self.peersRestrictedTable.insert().from_select(
@@ -725,8 +763,8 @@ class WireguardConfiguration:
                     try:
                         if not is_restricted:
                             try:
-                                subprocess.check_output(f"{self.Protocol} set {self.Name} peer {pf.id} remove",
-                                                        shell=True, stderr=subprocess.STDOUT)
+                                command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
+                                subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
                             except Exception:
                                 pass
                         conn.execute(
@@ -764,7 +802,7 @@ class WireguardConfiguration:
     def __wgSave(self) -> tuple[bool, str] | tuple[bool, None]:
         try:
             command = [f"{self.Protocol}-quick", "save", self.Name]
-            subprocess.check_output(command, stderr=subprocess.STDOUT)
+            subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
             return True, None
         except Exception as e:
@@ -772,154 +810,172 @@ class WireguardConfiguration:
             return False, "Internal server error"
 
     def getPeersLatestHandshake(self):
-        if not self.getStatus():
-            self.toggleConfiguration()
         try:
-            command = [self.Protocol, "show", self.Name, "latest-handshakes"]
-            latestHandshake = subprocess.check_output(command, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError:
-            return "stopped"
-        latestHandshake = latestHandshake.decode("UTF-8").split()
-        count = 0
-        now = datetime.now()
-        time_delta = timedelta(minutes=3)
+            if not self.getStatus():
+                self.toggleConfiguration()
+            try:
+                command = [self.Protocol, "show", self.Name, "latest-handshakes"]
+                latestHandshake = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+            except subprocess.CalledProcessError:
+                return "stopped"
+            latestHandshake = latestHandshake.decode("UTF-8").split()
+            count = 0
+            now = datetime.now()
+            time_delta = timedelta(minutes=3)
 
-        updates = []
-        for _ in range(int(len(latestHandshake) / 2)):
-            minus = now - datetime.fromtimestamp(int(latestHandshake[count + 1]))
-            if minus < time_delta:
-                status = "running"
-            else:
-                status = "stopped"
-            
-            if int(latestHandshake[count + 1]) > 0:
-                lh_str = str(minus).split(".", maxsplit=1)[0]
-            else:
-                lh_str = "No Handshake"
+            updates = []
+            peer_dict = {p.id: p for p in self.Peers}
+            for _ in range(int(len(latestHandshake) / 2)):
+                minus = now - datetime.fromtimestamp(int(latestHandshake[count + 1]))
+                if minus < time_delta:
+                    status = "running"
+                else:
+                    status = "stopped"
                 
-            updates.append({
-                "b_id": latestHandshake[count],
-                "b_latest_handshake": lh_str,
-                "b_status": status
-            })
-            count += 2
-            
-        if len(updates) > 0:
-            with self.engine.begin() as conn:
-                stmt = self.peersTable.update().where(
-                    self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                ).values(
-                    latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
-                    status=sqlalchemy.bindparam('b_status')
-                )
-                conn.execute(stmt, updates)
+                if int(latestHandshake[count + 1]) > 0:
+                    lh_str = str(minus).split(".", maxsplit=1)[0]
+                else:
+                    lh_str = "No Handshake"
+                    
+                pubkey = latestHandshake[count]
+                p = peer_dict.get(pubkey)
+                if p is None or p.latest_handshake != lh_str or p.status != status:
+                    updates.append({
+                        "b_id": pubkey,
+                        "b_latest_handshake": lh_str,
+                        "b_status": status
+                    })
+                count += 2
+                
+            if len(updates) > 0:
+                with self.engine.begin() as conn:
+                    stmt = self.peersTable.update().where(
+                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                    ).values(
+                        latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
+                        status=sqlalchemy.bindparam('b_status')
+                    )
+                    conn.execute(stmt, updates)
+        except Exception as e:
+            current_app.logger.error(f"Error in getPeersLatestHandshake for {self.Name}: {e}")
 
     def getPeersTransfer(self):
-        if not self.getStatus():
-            self.toggleConfiguration()
-        # try:
-        command = [self.Protocol, "show", self.Name, "transfer"]
-        data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT)
+        try:
+            if not self.getStatus():
+                self.toggleConfiguration()
+            # try:
+            command = [self.Protocol, "show", self.Name, "transfer"]
+            data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
-        data_usage = data_usage.decode("UTF-8").split("\n")
-        
-        data_usage = [p.split("\t") for p in data_usage]
-        
-        existing_peers = {}
-        with self.engine.connect() as conn:
-            for row in conn.execute(self.peersTable.select()).mappings().fetchall():
-                existing_peers[row['id']] = row
-                
-        cumu_updates = []
-        total_updates = []
-        
-        for i in range(len(data_usage)):
-            if len(data_usage[i]) == 3:
-                cur_i = existing_peers.get(data_usage[i][0])
-                if cur_i is not None:
-                    total_sent = cur_i['total_sent']
-                    total_receive = cur_i['total_receive']
-                    cur_total_sent = float(data_usage[i][2]) / (1024 ** 3)
-                    cur_total_receive = float(data_usage[i][1]) / (1024 ** 3)
-                    cumulative_receive = cur_i['cumu_receive'] + total_receive
-                    cumulative_sent = cur_i['cumu_sent'] + total_sent
-                    if (total_sent * 0.999 ) <= cur_total_sent and (total_receive * 0.999) <= cur_total_receive: 
-                        total_sent = cur_total_sent
-                        total_receive = cur_total_receive
-                    else:
-                        cumu_updates.append({
-                            "b_id": data_usage[i][0],
-                            "b_cumu_receive": cumulative_receive,
-                            "b_cumu_sent": cumulative_sent,
-                            "b_cumu_data": cumulative_sent + cumulative_receive
-                        })
-                        total_sent = 0
-                        total_receive = 0
+            data_usage = data_usage.decode("UTF-8").split("\n")
+            
+            data_usage = [p.split("\t") for p in data_usage]
+            
+            existing_peers = {}
+            with self.engine.connect() as conn:
+                for row in conn.execute(self.peersTable.select()).mappings().fetchall():
+                    existing_peers[row['id']] = row
                     
-                    status, p = self.searchPeer(data_usage[i][0])
-                    if status and (p.total_receive != total_receive or p.total_sent != total_sent):
-                        total_updates.append({
-                            "b_id": data_usage[i][0],
-                            "b_total_receive": total_receive,
-                            "b_total_sent": total_sent,
-                            "b_total_data": total_receive + total_sent
-                        })
+            cumu_updates = []
+            total_updates = []
+            
+            for i in range(len(data_usage)):
+                if len(data_usage[i]) == 3:
+                    cur_i = existing_peers.get(data_usage[i][0])
+                    if cur_i is not None:
+                        total_sent = cur_i['total_sent']
+                        total_receive = cur_i['total_receive']
+                        cur_total_sent = float(data_usage[i][2]) / (1024 ** 3)
+                        cur_total_receive = float(data_usage[i][1]) / (1024 ** 3)
+                        cumulative_receive = cur_i['cumu_receive'] + total_receive
+                        cumulative_sent = cur_i['cumu_sent'] + total_sent
+                        if (total_sent * 0.999 ) <= cur_total_sent and (total_receive * 0.999) <= cur_total_receive: 
+                            total_sent = cur_total_sent
+                            total_receive = cur_total_receive
+                        else:
+                            cumu_updates.append({
+                                "b_id": data_usage[i][0],
+                                "b_cumu_receive": cumulative_receive,
+                                "b_cumu_sent": cumulative_sent,
+                                "b_cumu_data": cumulative_sent + cumulative_receive
+                            })
+                            total_sent = 0
+                            total_receive = 0
+                        
+                        status, p = self.searchPeer(data_usage[i][0])
+                        if status and (p.total_receive != total_receive or p.total_sent != total_sent):
+                            total_updates.append({
+                                "b_id": data_usage[i][0],
+                                "b_total_receive": total_receive,
+                                "b_total_sent": total_sent,
+                                "b_total_data": total_receive + total_sent
+                            })
 
-        with self.engine.begin() as conn:
-            if len(cumu_updates) > 0:
-                stmt_cumu = self.peersTable.update().where(
-                    self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                ).values(
-                    cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
-                    cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
-                    cumu_data=sqlalchemy.bindparam('b_cumu_data')
-                )
-                conn.execute(stmt_cumu, cumu_updates)
-                
-            if len(total_updates) > 0:
-                stmt_total = self.peersTable.update().where(
-                    self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                ).values(
-                    total_receive=sqlalchemy.bindparam('b_total_receive'),
-                    total_sent=sqlalchemy.bindparam('b_total_sent'),
-                    total_data=sqlalchemy.bindparam('b_total_data')
-                )
-                conn.execute(stmt_total, total_updates)
+            with self.engine.begin() as conn:
+                if len(cumu_updates) > 0:
+                    stmt_cumu = self.peersTable.update().where(
+                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                    ).values(
+                        cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
+                        cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
+                        cumu_data=sqlalchemy.bindparam('b_cumu_data')
+                    )
+                    conn.execute(stmt_cumu, cumu_updates)
+                    
+                if len(total_updates) > 0:
+                    stmt_total = self.peersTable.update().where(
+                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                    ).values(
+                        total_receive=sqlalchemy.bindparam('b_total_receive'),
+                        total_sent=sqlalchemy.bindparam('b_total_sent'),
+                        total_data=sqlalchemy.bindparam('b_total_data')
+                    )
+                    conn.execute(stmt_total, total_updates)
+        except Exception as e:
+            current_app.logger.error(f"Error in getPeersTransfer for {self.Name}: {e}")
 
     def getPeersEndpoint(self):
-        if not self.getStatus():
-            self.toggleConfiguration()
         try:
-            command = [self.Protocol, "show", self.Name, "endpoints"]
-            data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError:
-            return "stopped"
+            if not self.getStatus():
+                self.toggleConfiguration()
+            try:
+                command = [self.Protocol, "show", self.Name, "endpoints"]
+                data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+            except subprocess.CalledProcessError:
+                return "stopped"
 
-        data_usage = data_usage.decode("UTF-8").split()
-        count = 0
-        updates = []
-        for _ in range(int(len(data_usage) / 2)):
-            updates.append({
-                "b_id": data_usage[count],
-                "b_endpoint": data_usage[count + 1]
-            })
-            count += 2
-            
-        if len(updates) > 0:
-            with self.engine.begin() as conn:
-                stmt = self.peersTable.update().where(
-                    self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                ).values(
-                    endpoint=sqlalchemy.bindparam('b_endpoint')
-                )
-                conn.execute(stmt, updates)
+            data_usage = data_usage.decode("UTF-8").split()
+            count = 0
+            updates = []
+            peer_dict = {p.id: p for p in self.Peers}
+            for _ in range(int(len(data_usage) / 2)):
+                pubkey = data_usage[count]
+                endpoint = data_usage[count + 1]
+                p = peer_dict.get(pubkey)
+                if p is None or p.endpoint != endpoint:
+                    updates.append({
+                        "b_id": pubkey,
+                        "b_endpoint": endpoint
+                    })
+                count += 2
+                
+            if len(updates) > 0:
+                with self.engine.begin() as conn:
+                    stmt = self.peersTable.update().where(
+                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                    ).values(
+                        endpoint=sqlalchemy.bindparam('b_endpoint')
+                    )
+                    conn.execute(stmt, updates)
+        except Exception as e:
+            current_app.logger.error(f"Error in getPeersEndpoint for {self.Name}: {e}")
 
     def toggleConfiguration(self) -> tuple[bool, str] | tuple[bool, None]:
         self.getStatus()
         if self.Status:
             try:
                 command = [f"{self.Protocol}-quick", "down", self.Name]
-                check = subprocess.check_output(command, stderr=subprocess.STDOUT)
+                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
                 self.removeAutostart()
             except subprocess.CalledProcessError as exc:
@@ -927,7 +983,7 @@ class WireguardConfiguration:
         else:
             try:
                 command = [f"{self.Protocol}-quick", "up", self.Name]
-                check = subprocess.check_output(command, stderr=subprocess.STDOUT)
+                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
                 self.addAutostart()
             except subprocess.CalledProcessError as exc:
@@ -995,8 +1051,9 @@ class WireguardConfiguration:
         files.sort(key=lambda x: x[1], reverse=True)
 
         for f, ct in files:
-            if RegexMatch(rf"^({self.Name})_(\d+)\\.(conf)$", f):
-                s = re.search(rf"^({self.Name})_(\d+)\\.(conf)$", f)
+            pattern = rf"^({re.escape(self.Name)})_(\d+)\.conf$"
+            if RegexMatch(pattern, f):
+                s = re.search(pattern, f)
                 date = s.group(2)
                 d = {
                     "filename": f,
@@ -1292,7 +1349,7 @@ class WireguardConfiguration:
         elif key == "OverridePeerSettings":
             for (key, val) in value.items():
                 try:
-                    status, msg = self.__validateOverridePeerSettings(key, jinja2.Template(val).render(configuration=self.toJson()))
+                    status, msg = self.__validateOverridePeerSettings(key, _jinja_env.from_string(val).render(configuration=self.toJson()))
                     if not status:
                         return False, msg, key
                 except Exception as e:

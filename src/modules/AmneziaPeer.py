@@ -35,18 +35,19 @@ class AmneziaPeer(Peer):
         peers = []
         for peer in self.configuration.getPeersList():
             # Make sure to exclude your own data when updating since its not really relevant
-            if peer.id != self.id:
+            if peer.id == self.id:
                 continue
             peers.append(peer)
 
         used_allowed_ips = []
         for peer in peers:
             ips = peer.allowed_ip.split(',')
-            ips = [ip.strip() for ip in ips]
-            used_allowed_ips.append(ips)
+            for ip in ips:
+                used_allowed_ips.append(ip.strip())
 
-        if allowed_ip in used_allowed_ips:
-            return False, "Allowed IP already taken by another peer"
+        for ip in allowed_ip.split(','):
+            if ip.strip() in used_allowed_ips:
+                return False, "Allowed IP already taken by another peer"
 
         if not ValidateDNSAddress(dns_addresses):
             return False, f"DNS IP-Address or FQDN is incorrect"
@@ -73,26 +74,27 @@ class AmneziaPeer(Peer):
             uid = str(uuid.UUID(int=rand.getrandbits(128), version=4))
             psk_exist = len(preshared_key) > 0
 
-            if psk_exist:
-                with open(uid, "w+") as f:
-                    f.write(preshared_key)
-
             newAllowedIPs = allowed_ip.replace(" ", "")
             if not CheckAddress(newAllowedIPs):
                 return False, "Allowed IPs entry format is incorrect"
 
-            command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
+            try:
+                if psk_exist:
+                    with open(uid, "w+") as f:
+                        f.write(preshared_key)
 
-            updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT)
-
-            if psk_exist: os.remove(uid)
+                command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
+                updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+            finally:
+                if psk_exist and os.path.exists(uid):
+                    os.remove(uid)
 
             if len(updateAllowedIp.decode().strip("\n")) != 0:
                 current_app.logger.error(f"Update peer failed when updating Allowed IPs.\nInput: {newAllowedIPs}\nOutput: {updateAllowedIp.decode().strip('\n')}")
                 return False, "Internal server error"
 
             command = [f"{self.configuration.Protocol}-quick", "save", self.configuration.Name]
-            saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT)
+            saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
             if f"wg showconf {self.configuration.Name}" not in saveConfig.decode().strip('\n'):
                 current_app.logger.error("Update peer failed when saving the configuration")

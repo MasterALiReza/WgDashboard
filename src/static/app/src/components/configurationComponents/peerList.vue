@@ -92,9 +92,19 @@ const fetchPeerList = async () => {
 			
 			configurationPeers.value.forEach(p => {
 				p.restricted = false
+				p.configuration = {
+					Name: route.params.id,
+					Protocol: configurationInfo.value.Protocol,
+					ListenPort: configurationInfo.value.ListenPort
+				}
 			})
 			res.data.configurationRestrictedPeers.forEach(x => {
 				x.restricted = true;
+				x.configuration = {
+					Name: route.params.id,
+					Protocol: configurationInfo.value.Protocol,
+					ListenPort: configurationInfo.value.ListenPort
+				}
 				configurationPeers.value.push(x)
 			})
 		}

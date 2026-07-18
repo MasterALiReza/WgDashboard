@@ -282,18 +282,19 @@ class AmneziaConfiguration(WireguardConfiguration):
                 presharedKeyExist = len(p['preshared_key']) > 0
                 rd = random.Random()
                 uid = str(uuid.UUID(int=rd.getrandbits(128), version=4))
-                if presharedKeyExist:
-                    with open(uid, "w+") as f:
-                        f.write(p['preshared_key'])
+                try:
+                    if presharedKeyExist:
+                        with open(uid, "w+") as f:
+                            f.write(p['preshared_key'])
 
-                command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                subprocess.check_output(command, stderr=subprocess.STDOUT)
-
-                if presharedKeyExist:
-                    os.remove(uid)
+                    command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                finally:
+                    if presharedKeyExist and os.path.exists(uid):
+                        os.remove(uid)
 
             command = [f"{self.Protocol}-quick", "save", self.Name]
-            subprocess.check_output(command, stderr=subprocess.STDOUT)
+            subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
 
             self.getPeers()
             for p in peers:

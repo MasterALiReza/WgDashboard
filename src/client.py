@@ -11,6 +11,9 @@ import mimetypes
 from modules.WireguardConfiguration import WireguardConfiguration
 from modules.DashboardConfig import DashboardConfig
 from modules.Email import EmailSender
+from modules.Utilities import SimpleRateLimiter
+
+client_limiter = SimpleRateLimiter()
 
 
 def ResponseObject(status=True, message=None, data=None, status_code = 200) -> Flask.response_class:
@@ -54,6 +57,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     
     @client.post(f'{prefix}/api/signup')
     def ClientAPI_SignUp():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"signup_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many sign up attempts. Please try again in a minute.", status_code=429)
         if not dashboardConfig.GetConfig("Clients", "sign_up")[1]:
             abort(404)
         data = request.get_json()
@@ -70,6 +76,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     
     @client.post(f'{prefix}/api/signin/oidc')
     def ClientAPI_SignIn_OIDC():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"signin_oidc_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many attempts. Please try again in a minute.", status_code=429)
         _, oidc = dashboardConfig.GetConfig("OIDC", "client_enable")
         if not oidc:
             return ResponseObject(status=False, message="OIDC is disabled")
@@ -87,6 +96,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     
     @client.post(f'{prefix}/api/signin')
     def ClientAPI_SignIn():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"signin_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many sign in attempts. Please try again in a minute.", status_code=429)
         data = request.get_json()
         status, msg = dashboardClients.SignIn(**data)
         if status:
@@ -97,6 +109,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
 
     @client.post(f'{prefix}/api/resetPassword/generateResetToken')
     def ClientAPI_ResetPassword_GenerateResetToken():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"reset_token_{ip}", limit=3, period=60):
+            return ResponseObject(False, "Too many password reset requests. Please try again in a minute.", status_code=429)
         date = datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
         
         emailSender = EmailSender(dashboardConfig)
@@ -123,6 +138,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     
     @client.post(f'{prefix}/api/resetPassword/validateResetToken')
     def ClientAPI_ResetPassword_ValidateResetToken():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"reset_validate_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many attempts. Please try again in a minute.", status_code=429)
         data = request.get_json()
         email = data.get('Email', None)
         token = data.get('Token', None)
@@ -137,6 +155,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     
     @client.post(f'{prefix}/api/resetPassword')
     def ClientAPI_ResetPassword():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"reset_pwd_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many attempts. Please try again in a minute.", status_code=429)
         data = request.get_json()
         email = data.get('Email', None)
         token = data.get('Token', None)
@@ -177,6 +198,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
 
     @client.post(f'{prefix}/api/signin/totp')
     def ClientAPI_SignIn_ValidateTOTP():
+        ip = request.remote_addr
+        if client_limiter.check_rate_limit(f"totp_{ip}", limit=5, period=60):
+            return ResponseObject(False, "Too many TOTP attempts. Please try again in a minute.", status_code=429)
         data = request.get_json()
         token = data.get('Token', None)
         userProvidedTotp = data.get('UserProvidedTOTP', None)

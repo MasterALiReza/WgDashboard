@@ -67,7 +67,7 @@ class DashboardOIDC:
             }
     
             try:
-                tokens = requests.post(oidc_config.get('token_endpoint'), data=data).json()
+                tokens = requests.post(oidc_config.get('token_endpoint'), data=data, timeout=10).json()
                 if not all([tokens.get('access_token'), tokens.get('id_token')]):
                     return False, tokens.get('error_description', None)
             except Exception as e:
@@ -78,7 +78,7 @@ class DashboardOIDC:
             id_token = tokens.get('id_token')
             jwks_uri = oidc_config.get("jwks_uri")
             issuer = oidc_config.get("issuer")
-            jwks = requests.get(jwks_uri, verify=certifi.where()).json()
+            jwks = requests.get(jwks_uri, verify=certifi.where(), timeout=10).json()
     
             headers = jwt.get_unverified_header(id_token)
             kid = headers["kid"]
@@ -106,7 +106,8 @@ class DashboardOIDC:
         try:
             oidc_config = requests.get(
                 f"{provider.get('issuer').strip('/')}/.well-known/openid-configuration",
-                verify=certifi.where()
+                verify=certifi.where(),
+                timeout=10
             ).json()
         except Exception as e:
             current_app.logger.error("Failed to get OpenID Configuration of " + provider.get('issuer'), exc_info=e)

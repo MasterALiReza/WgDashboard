@@ -20,8 +20,15 @@ def post_worker_init(worker):
     dashboard.DashboardPlugins.startThreads()
 
 worker_class = 'gthread'
+# CRITICAL ARCHITECTURAL NOTE:
+# workers MUST remain 1. WGDashboard relies on in-process threading.RLock() and background threads
+# (peerInformationBackgroundThread, peerJobScheduleBackgroundThread) inside a single Python process.
+# Increasing workers > 1 will spawn duplicate background loops and break lock synchronization across
+# processes, causing SQLite 'database is locked' errors and WireGuard configuration corruption.
 workers = 1
 threads = 8
+timeout = 120
+keepalive = 5
 bind = f"{app_host}:{app_port}"
 daemon = True
 pidfile = './gunicorn.pid'

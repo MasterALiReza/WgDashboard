@@ -47,6 +47,8 @@ def CheckAddress(ips_str: str) -> bool:
 
     for ip in ips_str.split(','):
         stripped_ip = ip.strip()
+        if '.' not in stripped_ip and ':' not in stripped_ip:
+            return False
         try:
             # Verify the IP-address, with the strict flag as false also allows for /32 and /128
             ipaddress.ip_network(stripped_ip, strict=False)
@@ -82,18 +84,18 @@ def ValidateEndpointAllowedIPs(IPs) -> tuple[bool, str] | tuple[bool, None]:
 
 def GenerateWireguardPublicKey(privateKey: str) -> tuple[bool, str] | tuple[bool, None]:
     try:
-        publicKey = subprocess.check_output(f"wg pubkey", input=privateKey.encode(), shell=True,
-                                            stderr=subprocess.STDOUT)
+        publicKey = subprocess.check_output(["wg", "pubkey"], input=privateKey.encode(),
+                                            stderr=subprocess.STDOUT, timeout=10)
         return True, publicKey.decode().strip('\n')
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False, None
     
 def GenerateWireguardPrivateKey() -> tuple[bool, str] | tuple[bool, None]:
     try:
-        publicKey = subprocess.check_output(f"wg genkey", shell=True,
-                                            stderr=subprocess.STDOUT)
+        publicKey = subprocess.check_output(["wg", "genkey"],
+                                            stderr=subprocess.STDOUT, timeout=10)
         return True, publicKey.decode().strip('\n')
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False, None
     
 def ValidatePasswordStrength(password: str) -> tuple[bool, str] | tuple[bool, None]:
@@ -141,3 +143,34 @@ class ProcessLock:
             self.lock_fd.close()
             self.lock_fd = None
         self.thread_lock.release()
+
+import time
+
+class SimpleRateLimiter:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._requests = {}
+
+    def check_rate_limit(self, key: str, limit: int = 5, period: int = 60) -> bool:
+        """Returns True if the rate limit is exceeded (i.e. blocked), False otherwise."""
+        now = time.time()
+        with self._lock:
+            timestamps = self._requests.get(key, [])
+            timestamps = [t for t in timestamps if now - t < period]
+            if len(timestamps) >= limit:
+                self._requests[key] = timestamps
+                return True
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            if len(self._requests) > 10000:
+                self._cleanup_all(now, period)
+            return False
+
+    def _cleanup_all(self, now: float, period: int):
+        keys_to_delete = []
+        for k, v in self._requests.items():
+            self._requests[k] = [t for t in v if now - t < period]
+            if not self._requests[k]:
+                keys_to_delete.append(k)
+        for k in keys_to_delete:
+            del self._requests[k]

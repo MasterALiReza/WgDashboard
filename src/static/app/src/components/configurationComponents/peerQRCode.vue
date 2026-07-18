@@ -43,7 +43,7 @@ export default {
 						hostName: this.dashboardStore.Configuration.Peers.remote_endpoint
 					}
 					QRCode.toCanvas(
-						document.querySelector("#awg_vpn_qrcode"), btoa(JSON.stringify(awgQRCodeObject)), (error) => {
+						document.querySelector("#awg_vpn_qrcode"), btoa(unescape(encodeURIComponent(JSON.stringify(awgQRCodeObject)))), (error) => {
 							if (error) console.error(error)
 						}
 					)

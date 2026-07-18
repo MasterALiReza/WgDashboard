@@ -8,6 +8,8 @@ import os, subprocess, uuid, random, re
 from datetime import timedelta
 
 import jinja2
+from jinja2.sandbox import SandboxedEnvironment
+_jinja_env = SandboxedEnvironment()
 import sqlalchemy as db
 from .PeerJob import PeerJob
 from  flask import current_app
@@ -47,7 +49,10 @@ class Peer:
     def toJson(self):
         # self.getJobs()
         # self.getShareLink()
-        return self.__dict__
+        data = dict(self.__dict__)
+        if "configuration" in data:
+            del data["configuration"]
+        return data
 
     def __repr__(self):
         return str(self.toJson())
@@ -63,97 +68,105 @@ class Peer:
                    notes: str
                    ) -> tuple[bool, str | None]:
 
-        if not self.configuration.getStatus():
+        was_running = self.configuration.getStatus()
+        if not was_running:
             self.configuration.toggleConfiguration()
 
-        # Before we do any compute, let us check if the given endpoint allowed ip is valid at all
-        if not CheckAddress(endpoint_allowed_ip):
-            return False, f"Endpoint Allowed IPs format is incorrect"
-
-        peers = []
-        for peer in self.configuration.getPeersList():
-            # Make sure to exclude your own data when updating since its not really relevant
-            if peer.id == self.id:
-                continue
-            peers.append(peer)
-
-        used_allowed_ips = []
-        for peer in peers:
-            ips = peer.allowed_ip.split(',')
-            ips = [ip.strip() for ip in ips]
-            used_allowed_ips.append(ips)
-
-        if allowed_ip in used_allowed_ips:
-            return False, "Allowed IP already taken by another peer"
-
-        if not ValidateDNSAddress(dns_addresses):
-            return False, f"DNS IP-Address or FQDN is incorrect"
-
-        if isinstance(mtu, str):
-            mtu = 0
-
-        if isinstance(keepalive, str):
-            keepalive = 0
-
-        if mtu not in range(0, 1461):
-            return False, "MTU format is not correct"
-
-        if keepalive < 0:
-            return False, "Persistent Keepalive format is not correct"
-
-        if len(private_key) > 0:
-            pubKey = GenerateWireguardPublicKey(private_key)
-            if not pubKey[0] or pubKey[1] != self.id:
-                return False, "Private key does not match with the public key"
-
         try:
-            rand = random.Random()
-            uid = str(uuid.UUID(int=rand.getrandbits(128), version=4))
-            psk_exist = len(preshared_key) > 0
+            # Before we do any compute, let us check if the given endpoint allowed ip is valid at all
+            if not CheckAddress(endpoint_allowed_ip):
+                return False, f"Endpoint Allowed IPs format is incorrect"
 
-            if psk_exist:
-                with open(uid, "w+") as f:
-                    f.write(preshared_key)
+            peers = []
+            for peer in self.configuration.getPeersList():
+                # Make sure to exclude your own data when updating since its not really relevant
+                if peer.id == self.id:
+                    continue
+                peers.append(peer)
 
-            newAllowedIPs = allowed_ip.replace(" ", "")
-            if not CheckAddress(newAllowedIPs):
-                    return False, "Allowed IPs entry format is incorrect"
+            used_allowed_ips = []
+            for peer in peers:
+                ips = peer.allowed_ip.split(',')
+                for ip in ips:
+                    used_allowed_ips.append(ip.strip())
 
-            command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
-            updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT)
+            for ip in allowed_ip.split(','):
+                if ip.strip() in used_allowed_ips:
+                    return False, "Allowed IP already taken by another peer"
 
-            if psk_exist: os.remove(uid)
+            if not ValidateDNSAddress(dns_addresses):
+                return False, f"DNS IP-Address or FQDN is incorrect"
 
-            if len(updateAllowedIp.decode().strip("\n")) != 0:
-                current_app.logger.error("Update peer failed when updating Allowed IPs")
-                return False, "Internal server error"
+            if isinstance(mtu, str):
+                mtu = 0
 
-            command = [f"{self.configuration.Protocol}-quick", "save", self.configuration.Name]
-            saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT)
+            if isinstance(keepalive, str):
+                keepalive = 0
 
-            if f"wg showconf {self.configuration.Name}" not in saveConfig.decode().strip('\n'):
-                current_app.logger.error("Update peer failed when saving the configuration")
-                return False, "Internal server error"
+            if mtu not in range(0, 1461):
+                return False, "MTU format is not correct"
 
-            with self.configuration.engine.begin() as conn:
-                conn.execute(
-                    self.configuration.peersTable.update().values({
-                        "name": name,
-                        "private_key": private_key,
-                        "DNS": dns_addresses,
-                        "endpoint_allowed_ip": endpoint_allowed_ip,
-                        "mtu": mtu,
-                        "keepalive": keepalive,
-                        "notes": notes,
-                        "preshared_key": preshared_key
-                    }).where(
-                        self.configuration.peersTable.c.id == self.id
+            if keepalive < 0:
+                return False, "Persistent Keepalive format is not correct"
+
+            if len(private_key) > 0:
+                pubKey = GenerateWireguardPublicKey(private_key)
+                if not pubKey[0] or pubKey[1] != self.id:
+                    return False, "Private key does not match with the public key"
+
+            try:
+                rand = random.Random()
+                uid = str(uuid.UUID(int=rand.getrandbits(128), version=4))
+                psk_exist = len(preshared_key) > 0
+
+                try:
+                    if psk_exist:
+                        with open(uid, "w+") as f:
+                            f.write(preshared_key)
+
+                    newAllowedIPs = allowed_ip.replace(" ", "")
+                    if not CheckAddress(newAllowedIPs):
+                        return False, "Allowed IPs entry format is incorrect"
+
+                    command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
+                    updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                finally:
+                    if psk_exist and os.path.exists(uid):
+                        os.remove(uid)
+
+                if len(updateAllowedIp.decode().strip("\n")) != 0:
+                    current_app.logger.error("Update peer failed when updating Allowed IPs")
+                    return False, "Internal server error"
+
+                command = [f"{self.configuration.Protocol}-quick", "save", self.configuration.Name]
+                saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+
+                if f"wg showconf {self.configuration.Name}" not in saveConfig.decode().strip('\n'):
+                    current_app.logger.error("Update peer failed when saving the configuration")
+                    return False, "Internal server error"
+
+                with self.configuration.engine.begin() as conn:
+                    conn.execute(
+                        self.configuration.peersTable.update().values({
+                            "name": name,
+                            "private_key": private_key,
+                            "DNS": dns_addresses,
+                            "endpoint_allowed_ip": endpoint_allowed_ip,
+                            "mtu": mtu,
+                            "keepalive": keepalive,
+                            "notes": notes,
+                            "preshared_key": preshared_key
+                        }).where(
+                            self.configuration.peersTable.c.id == self.id
+                        )
                     )
-                )
-            return True, None
-        except subprocess.CalledProcessError as exc:
-            current_app.logger.error(f"Subprocess call failed:\n{exc.output.decode('UTF-8')}")
-            return False, "Internal server error"
+                return True, None
+            except subprocess.CalledProcessError as exc:
+                current_app.logger.error(f"Subprocess call failed:\n{exc.output.decode('UTF-8')}")
+                return False, "Internal server error"
+        finally:
+            if not was_running and self.configuration.getStatus():
+                self.configuration.toggleConfiguration()
 
     def downloadPeer(self) -> dict[str, str]:
         final = {
@@ -161,7 +174,7 @@ class Peer:
             "file": ""
         }
         filename = self.name
-        if len(filename) == 0:
+        if not filename or len(filename) == 0:
             filename = "UntitledPeer"
         filename = "".join(filename.split(' '))
 
@@ -234,7 +247,7 @@ class Peer:
                 if val is not None and ((type(val) is str and len(val) > 0) or (type(val) is int and val > 0)):
                     final["file"] += f"{key} = {val}\n"
 
-        final["file"] = jinja2.Template(final["file"]).render(configuration=self.configuration)
+        final["file"] = _jinja_env.from_string(final["file"]).render(configuration=self.configuration)
 
 
         if self.configuration.Protocol == "awg":

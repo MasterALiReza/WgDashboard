@@ -7,7 +7,8 @@ from zipfile import ZipFile
 from datetime import datetime, timedelta
 
 import sqlalchemy
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
+_jinja_env = SandboxedEnvironment()
 from flask import Flask, request, render_template, session, send_file, current_app
 from flask_cors import CORS
 from icmplib import ping, traceroute
@@ -18,8 +19,10 @@ from sqlalchemy import RowMapping
 
 from modules.Utilities import (
     RegexMatch, StringToBoolean, ValidateDNSAddress,
-    GenerateWireguardPublicKey, GenerateWireguardPrivateKey
+    GenerateWireguardPublicKey, GenerateWireguardPrivateKey,
+    SimpleRateLimiter
 )
+admin_limiter = SimpleRateLimiter()
 from packaging import version
 from modules.Email import EmailSender
 from modules.DashboardLogger import DashboardLogger
@@ -86,17 +89,19 @@ def peerInformationBackgroundThread():
     while True:
         with app.app_context():
             try:
-                curKeys = list(WireguardConfigurations.keys())
+                with WireguardConfigurationsLock:
+                    curKeys = list(WireguardConfigurations.keys())
                 for name in curKeys:
-                    if name in WireguardConfigurations.keys() and WireguardConfigurations.get(name) is not None:
+                    with WireguardConfigurationsLock:
                         c = WireguardConfigurations.get(name)
+                    if c is not None:
                         if c.getStatus():
                             c.getPeersLatestHandshake()
                             c.getPeersTransfer()
                             c.getPeersEndpoint()
                             c.getPeers()
                             if DashboardConfig.GetConfig('WireGuardConfiguration', 'peer_tracking')[1] is True:
-                                print("[WGDashboard] Tracking Peers")
+                                app.logger.debug("[WGDashboard] Tracking Peers")
                                 if delay == 6:
                                     if c.configurationInfo.PeerTrafficTracking:
                                         c.logPeersTraffic()
@@ -139,39 +144,40 @@ def ProtocolsEnabled() -> list[str]:
     return protocols
 
 def InitWireguardConfigurationsList(startup: bool = False):
-    if os.path.exists(DashboardConfig.GetConfig("Server", "wg_conf_path")[1]):
-        confs = os.listdir(DashboardConfig.GetConfig("Server", "wg_conf_path")[1])
-        confs.sort()
-        for i in confs:
-            if RegexMatch("^(.{1,}).(conf)$", i):
-                i = i.replace('.conf', '')
-                try:
-                    if i in WireguardConfigurations.keys():
-                        if WireguardConfigurations[i].configurationFileChanged():
+    with WireguardConfigurationsLock:
+        if os.path.exists(DashboardConfig.GetConfig("Server", "wg_conf_path")[1]):
+            confs = os.listdir(DashboardConfig.GetConfig("Server", "wg_conf_path")[1])
+            confs.sort()
+            for i in confs:
+                if RegexMatch("^(.{1,}).(conf)$", i):
+                    i = i.replace('.conf', '')
+                    try:
+                        if i in WireguardConfigurations.keys():
+                            if WireguardConfigurations[i].configurationFileChanged():
+                                with app.app_context():
+                                    WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
+                        else:
                             with app.app_context():
-                                WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
-                    else:
-                        with app.app_context():
-                            WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
-                except WireguardConfiguration.InvalidConfigurationFileException as e:
-                    app.logger.error(f"{i} have an invalid configuration file.")
+                                WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
+                    except WireguardConfiguration.InvalidConfigurationFileException as e:
+                        app.logger.error(f"{i} have an invalid configuration file.")
 
-    if "awg" in ProtocolsEnabled():
-        confs = os.listdir(DashboardConfig.GetConfig("Server", "awg_conf_path")[1])
-        confs.sort()
-        for i in confs:
-            if RegexMatch("^(.{1,}).(conf)$", i):
-                i = i.replace('.conf', '')
-                try:
-                    if i in WireguardConfigurations.keys():
-                        if WireguardConfigurations[i].configurationFileChanged():
+        if "awg" in ProtocolsEnabled():
+            confs = os.listdir(DashboardConfig.GetConfig("Server", "awg_conf_path")[1])
+            confs.sort()
+            for i in confs:
+                if RegexMatch("^(.{1,}).(conf)$", i):
+                    i = i.replace('.conf', '')
+                    try:
+                        if i in WireguardConfigurations.keys():
+                            if WireguardConfigurations[i].configurationFileChanged():
+                                with app.app_context():
+                                    WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
+                        else:
                             with app.app_context():
-                                WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
-                    else:
-                        with app.app_context():
-                            WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
-                except WireguardConfiguration.InvalidConfigurationFileException as e:
-                    app.logger.error(f"{i} have an invalid configuration file.")
+                                WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
+                    except WireguardConfiguration.InvalidConfigurationFileException as e:
+                        app.logger.error(f"{i} have an invalid configuration file.")
 
 def startThreads():
     bgThread = threading.Thread(target=peerInformationBackgroundThread, daemon=True)
@@ -191,14 +197,15 @@ dictConfig({
 
 
 WireguardConfigurations: dict[str, WireguardConfiguration] = {}
+WireguardConfigurationsLock = threading.Lock()
 CONFIGURATION_PATH = os.getenv('CONFIGURATION_PATH', '.')
 
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 5206928
-app.secret_key = secrets.token_urlsafe(32)
 app.json = CustomJsonEncoder(app)
 with app.app_context():
     SystemStatus = SystemStatus()
     DashboardConfig = DashboardConfig()
+    app.secret_key = DashboardConfig.GetConfig("Server", "flask_secret_key")[1]
     EmailSender = EmailSender(DashboardConfig)
     AllPeerShareLinks: PeerShareLinks = PeerShareLinks(DashboardConfig, WireguardConfigurations)
     AllPeerJobs: PeerJobs = PeerJobs(DashboardConfig, WireguardConfigurations, AllPeerShareLinks)
@@ -237,7 +244,8 @@ def auth_req():
         apiKeyEnabled = DashboardConfig.GetConfig("Server", "dashboard_api_key")[1]
         if apiKey is not None and len(apiKey) > 0 and apiKeyEnabled:
             apiKeyExist = len(list(filter(lambda x : x.Key == apiKey, DashboardConfig.DashboardAPIKeys))) == 1
-            DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"API Key Access: {('true' if apiKeyExist else 'false')} - Key: {apiKey}")
+            masked_key = apiKey[:4] + "****" + apiKey[-4:] if len(apiKey) > 8 else "****"
+            DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"API Key Access: {('true' if apiKeyExist else 'false')} - Key: {masked_key}")
             if not apiKeyExist:
                 DashboardConfig.APIAccessed = False
                 response = Flask.make_response(app, {
@@ -301,12 +309,17 @@ def API_RequireAuthentication():
 
 @app.post(f'{APP_PREFIX}/api/authenticate')
 def API_AuthenticateLogin():
+    ip = request.remote_addr
+    if admin_limiter.check_rate_limit(f"login_{ip}", limit=5, period=60):
+        DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login rate limited for IP: {ip}")
+        return ResponseObject(False, "Too many login attempts. Please try again in a minute.", status_code=429)
+
     data = request.get_json()
     if not DashboardConfig.GetConfig("Server", "auth_req")[1]:
         return ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
     
     if DashboardConfig.APIAccessed:
-        authToken = hashlib.sha256(f"{request.headers.get('wg-dashboard-apikey')}{datetime.now()}".encode()).hexdigest()
+        authToken = secrets.token_hex(32)
         session['role'] = 'admin'
         session['username'] = authToken
         resp = ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
@@ -324,7 +337,7 @@ def API_AuthenticateLogin():
             and data['username'] == DashboardConfig.GetConfig("Account", "username")[1]
             and ((totpEnabled and totpValid) or not totpEnabled)
     ):
-        authToken = hashlib.sha256(f"{data['username']}{datetime.now()}".encode()).hexdigest()
+        authToken = secrets.token_hex(32)
         session['role'] = 'admin'
         session['username'] = authToken
         resp = ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
@@ -663,8 +676,8 @@ def API_updateDashboardConfigurationItem():
         return ResponseObject(False, msg)
     if data['section'] == "Server":
         if data['key'] == 'wg_conf_path':
-            WireguardConfigurations.clear()
-            WireguardConfigurations.clear()
+            with WireguardConfigurationsLock:
+                WireguardConfigurations.clear()
             InitWireguardConfigurationsList()
     return ResponseObject(True, data=DashboardConfig.GetConfig(data["section"], data["key"])[1])
 
@@ -1083,7 +1096,7 @@ def API_GetPeerHistoricalEndpoints():
         geo = {}
         try:
             r = requests.post(f"http://ip-api.com/batch?fields=city,country,lat,lon,query",
-                              data=json.dumps([x['endpoint'] for x in result]))
+                              data=json.dumps([x['endpoint'] for x in result]), timeout=10)
             d = r.json()
             
                 
@@ -1318,7 +1331,7 @@ def API_ping_execute():
                     "geo": None
                 }
                 try:
-                    r = requests.get(f"http://ip-api.com/json/{result.address}?field=city")
+                    r = requests.get(f"http://ip-api.com/json/{result.address}?field=city", timeout=10)
                     data['geo'] = r.json()
                 except Exception as e:
                     pass
@@ -1361,7 +1374,7 @@ def API_traceroute_execute():
                     })
             try:
                 r = requests.post(f"http://ip-api.com/batch?fields=city,country,lat,lon,query",
-                                  data=json.dumps([x['ip'] for x in result]))
+                                  data=json.dumps([x['ip'] for x in result]), timeout=10)
                 d = r.json()
                 for i in range(len(result)):
                     result[i]['geo'] = d[i]
@@ -1508,10 +1521,10 @@ def API_Email_Send():
             if configuration is not None:
                 fp, p = configuration.searchPeer(data.get('Peer'))
                 if fp:
-                    template = Template(body)
+                    template = _jinja_env.from_string(body)
                     download = p.downloadPeer()
                     body = template.render(peer=p.toJson(), configurationFile=download)
-                    subject = Template(data.get('Subject', '')).render(peer=p.toJson(), configurationFile=download)
+                    subject = _jinja_env.from_string(data.get('Subject', '')).render(peer=p.toJson(), configurationFile=download)
                     if data.get('IncludeAttachment', False):
                         u = str(uuid4())
                         attachmentName = f'{u}.conf'
@@ -1539,11 +1552,11 @@ def API_Email_PreviewBody():
         return ResponseObject(False, "Peer does not exist")
 
     try:
-        template = Template(body)
+        template = _jinja_env.from_string(body)
         download = p.downloadPeer()
         return ResponseObject(data={
-            "Body": Template(body).render(peer=p.toJson(), configurationFile=download),
-            "Subject": Template(subject).render(peer=p.toJson(), configurationFile=download)
+            "Body": _jinja_env.from_string(body).render(peer=p.toJson(), configurationFile=download),
+            "Subject": _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
         })
     except Exception as e:
         return ResponseObject(False, message=str(e))

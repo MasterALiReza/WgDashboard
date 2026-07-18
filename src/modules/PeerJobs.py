@@ -1,7 +1,7 @@
 """
 Peer Jobs
 """
-import sqlalchemy
+import sqlalchemy, threading
 
 from .DatabaseConnection import ConnectionString
 from .PeerJob import PeerJob
@@ -12,6 +12,7 @@ from flask import current_app
 
 class PeerJobs:
     def __init__(self, DashboardConfig, WireguardConfigurations, AllPeerShareLinks):
+        self.lock = threading.Lock()
         self.Jobs: list[PeerJob] = []
         self.engine = db.create_engine(ConnectionString('wgdashboard_job'))
         self.metadata = db.MetaData()
@@ -145,57 +146,58 @@ class PeerJobs:
 
 
     def runJob(self):
-        self.cleanJob()
-        needToDelete = []
-        self.__getJobs()
-        for job in self.Jobs:
-            c = self.WireguardConfigurations.get(job.Configuration)
-            if c is not None:
-                f, fp = c.searchPeer(job.Peer)
-                if f:
-                    if job.Field in ["total_receive", "total_sent", "total_data"]:
-                        s = job.Field.split("_")[1]
-                        x: float = getattr(fp, f"total_{s}") + getattr(fp, f"cumu_{s}")
-                        y: float = float(job.Value)
-                    else:
-                        x: datetime = datetime.now()
-                        y: datetime = datetime.strptime(job.Value, "%Y-%m-%d %H:%M:%S")
-                    runAction: bool = self.__runJob_Compare(x, y, job.Operator)
-                    if runAction:
-                        s = False
-                        
+        with self.lock:
+            self.cleanJob()
+            needToDelete = []
+            self.__getJobs()
+            for job in self.Jobs:
+                c = self.WireguardConfigurations.get(job.Configuration)
+                if c is not None:
+                    f, fp = c.searchPeer(job.Peer)
+                    if f:
                         if job.Field in ["total_receive", "total_sent", "total_data"]:
-                            reason = "Volume Limit Reached"
+                            s = job.Field.split("_")[1]
+                            x: float = getattr(fp, f"total_{s}") + getattr(fp, f"cumu_{s}")
+                            y: float = float(job.Value)
                         else:
-                            reason = "Time Limit Reached"
+                            x: datetime = datetime.now()
+                            y: datetime = datetime.strptime(job.Value, "%Y-%m-%d %H:%M:%S")
+                        runAction: bool = self.__runJob_Compare(x, y, job.Operator)
+                        if runAction:
+                            s = False
                             
-                        if job.Action == "restrict":
-                            s, msg = c.restrictPeers([fp.id], reason=reason)
-                        elif job.Action == "delete":
-                            s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
-                        elif job.Action == "reset_total_data_usage":
-                            s = fp.resetDataUsage("total")
-                            c.restrictPeers([fp.id], reason="Resetting data usage")
-                            c.allowAccessPeers([fp.id])
-                        if s is True:
-                            self.JobLogger.log(job.JobID, s,
-                                          f"Peer {fp.id} from {c.Name} is successfully {job.Action}ed."
-                                          )
-                            needToDelete.append(job)
-                        else:
-                            self.JobLogger.log(job.JobID, s,
-                                          f"Peer {fp.id} from {c.Name} failed {job.Action}ed."
-                                          )
+                            if job.Field in ["total_receive", "total_sent", "total_data"]:
+                                reason = "Volume Limit Reached"
+                            else:
+                                reason = "Time Limit Reached"
+                                
+                            if job.Action == "restrict":
+                                s, msg = c.restrictPeers([fp.id], reason=reason)
+                            elif job.Action == "delete":
+                                s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
+                            elif job.Action == "reset_total_data_usage":
+                                s = fp.resetDataUsage("total")
+                                c.restrictPeers([fp.id], reason="Resetting data usage")
+                                c.allowAccessPeers([fp.id])
+                            if s is True:
+                                self.JobLogger.log(job.JobID, s,
+                                              f"Peer {fp.id} from {c.Name} is successfully {job.Action}ed."
+                                              )
+                                needToDelete.append(job)
+                            else:
+                                self.JobLogger.log(job.JobID, s,
+                                              f"Peer {fp.id} from {c.Name} failed {job.Action}ed."
+                                              )
+                    else:
+                        self.JobLogger.log(job.JobID, False,
+                                      f"Somehow can't find this peer {job.Peer} from {c.Name} failed {job.Action}ed."
+                                      )
                 else:
                     self.JobLogger.log(job.JobID, False,
-                                  f"Somehow can't find this peer {job.Peer} from {c.Name} failed {job.Action}ed."
+                                  f"Somehow can't find this peer {job.Peer} from {job.Configuration} failed {job.Action}ed."
                                   )
-            else:
-                self.JobLogger.log(job.JobID, False,
-                              f"Somehow can't find this peer {job.Peer} from {job.Configuration} failed {job.Action}ed."
-                              )
-        for j in needToDelete:
-            self.deleteJob(j)
+            for j in needToDelete:
+                self.deleteJob(j)
             
     def cleanJob(self, init = False):
         failingJobs = self.JobLogger.getFailingJobs()

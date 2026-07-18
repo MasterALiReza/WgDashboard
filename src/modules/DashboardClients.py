@@ -201,7 +201,8 @@ class DashboardClients:
             oidc_config.get("end_session_endpoint"), 
             params={
                 'id_token_hint': session.get('SignInPayload').get("Payload").get('sid')
-            }
+            },
+            timeout=10
         )
         return True
         
@@ -419,8 +420,8 @@ class DashboardClients:
         c = self.GetClient(ClientID)
         if c is None:
             return False
-        
-        newToken = str(random.randint(0, 999999)).zfill(6)
+        import secrets
+        newToken = "".join(secrets.choice("0123456789") for _ in range(6))
         with self.engine.begin() as conn:
             conn.execute(
                 self.dashboardClientsPasswordResetLinkTable.update().values({

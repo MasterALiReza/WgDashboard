@@ -27,7 +27,7 @@ onMounted(() => {
 			configurationFile.value = res.data.file
 			loading.value = false;
 		}else{
-			this.dashboardStore.newMessage("Server", res.message, "danger")
+			store.newMessage("Server", res.message, "danger")
 		}
 	})
 })

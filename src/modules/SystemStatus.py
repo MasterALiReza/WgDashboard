@@ -116,16 +116,19 @@ class NetworkInterfaces:
         
     def getInterfacePriorities(self):
         if shutil.which("ip"):
-            result = subprocess.check_output(["ip", "route", "show"]).decode()
-            priorities = {}
-            for line in result.splitlines():
-                if "metric" in line and "dev" in line:
-                    parts = line.split()
-                    dev = parts[parts.index("dev")+1]
-                    metric = int(parts[parts.index("metric")+1])
-                    if dev not in priorities:
-                        priorities[dev] = metric
-            return priorities
+            try:
+                result = subprocess.check_output(["ip", "route", "show"], timeout=5).decode()
+                priorities = {}
+                for line in result.splitlines():
+                    if "metric" in line and "dev" in line:
+                        parts = line.split()
+                        dev = parts[parts.index("dev")+1]
+                        metric = int(parts[parts.index("metric")+1])
+                        if dev not in priorities:
+                            priorities[dev] = metric
+                return priorities
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                return {}
         return {}
 
     def getData(self):

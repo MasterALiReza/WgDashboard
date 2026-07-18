@@ -392,6 +392,13 @@ install_wgd(){
 }
 
 check_wgd_status(){
+  if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+    if systemctl is-active --quiet wg-dashboard; then
+      return 0
+    else
+      return 1
+    fi
+  fi
   if test -f "$PID_FILE"; then
     if ps aux | grep -v grep | grep $(cat ./gunicorn.pid)  > /dev/null; then
     return 0
@@ -422,7 +429,7 @@ gunicorn_start () {
     export PATH=$PATH:/usr/local/bin:$HOME/.local/bin
   fi
   _check_and_set_venv
-  sudo "$venv_gunicorn" --config ./gunicorn.conf.py
+  sudo "$venv_gunicorn" --config ./gunicorn.conf.py dashboard:app
   sleep 5
   checkPIDExist=0
   while [ $checkPIDExist -eq 0 ]
@@ -456,7 +463,12 @@ start_wgd () {
 	if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
 		printf "[WGDashboard] Managed by systemd. Starting wg-dashboard.service...\n"
 		sudo systemctl start wg-dashboard
-		printf "[WGDashboard] WGDashboard service started successfully.\n"
+		sleep 2
+		if systemctl is-active --quiet wg-dashboard; then
+			printf "[WGDashboard] WGDashboard service started successfully.\n"
+		else
+			printf "[WGDashboard] Failed to start WGDashboard service.\n"
+		fi
 	else
 		gunicorn_start
 	fi
@@ -549,9 +561,7 @@ else
 	elif [ "$1" = "install" ]; then
 		install_wgd
 	elif [ "$1" = "restart" ]; then
-		if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
-			sudo systemctl restart wg-dashboard
-		elif check_wgd_status; then
+		if check_wgd_status; then
 			stop_wgd
 			start_wgd
 		else

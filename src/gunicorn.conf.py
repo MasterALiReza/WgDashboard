@@ -3,12 +3,17 @@ import configparser
 from datetime import datetime
 global sqldb, cursor, DashboardConfig, WireguardConfigurations, AllPeerJobs, JobLogger, Dash
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
+log_dir = os.path.join(base_dir, 'log')
+os.makedirs(log_dir, exist_ok=True)
+
 def get_bind():
-    if not os.path.exists('wg-dashboard.ini'):
+    ini_path = os.path.join(base_dir, 'wg-dashboard.ini')
+    if not os.path.exists(ini_path):
         from modules.DashboardConfig import DashboardConfig
         DashboardConfig()
     parser = configparser.ConfigParser(strict=False)
-    parser.read_file(open('wg-dashboard.ini', "r+"))
+    parser.read_file(open(ini_path, "r+"))
     return f"{parser.get('Server', 'app_ip')}:{parser.get('Server', 'app_port')}"
 
 app_host, app_port = get_bind().split(":")
@@ -31,12 +36,12 @@ timeout = 120
 keepalive = 5
 bind = f"{app_host}:{app_port}"
 daemon = True
-pidfile = './gunicorn.pid'
+pidfile = os.path.join(base_dir, 'gunicorn.pid')
 wsgi_app = "dashboard:app"
-accesslog = f"./log/access_{date}.log"
+accesslog = os.path.join(log_dir, f"access_{date}.log")
 loglevel = os.environ['log_level'] if 'log_level' in os.environ else 'info'
 capture_output = True
-errorlog = f"./log/error_{date}.log"
+errorlog = os.path.join(log_dir, f"error_{date}.log")
 pythonpath = "., ./modules"
 
 print(f"[Gunicorn] WGDashboard w/ Gunicorn will be running on {bind}", flush=True)

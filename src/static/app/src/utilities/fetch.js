@@ -1,6 +1,6 @@
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 import router from "@/router/router.js";
-const getHeaders = () => {
+export const getHeaders = () => {
 	let headers = {
 		"Content-Type": "application/json"
 	}

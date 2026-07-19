@@ -391,8 +391,20 @@ install_wgd(){
     printf "[WGDashboard] Enter ./wgd.sh start to start the dashboard\n"
 }
 
+_is_systemd_managed() {
+  if [ -n "$INVOCATION_ID" ] || [ -n "$WGD_SYSTEMD_CALLED" ]; then
+    return 1
+  fi
+  if [ -f "/etc/systemd/system/wg-dashboard.service" ] || [ -f "/lib/systemd/system/wg-dashboard.service" ] || [ -f "/usr/lib/systemd/system/wg-dashboard.service" ]; then
+    if systemctl list-unit-files wg-dashboard.service 2>/dev/null | grep -E 'wg-dashboard\.service[[:space:]]+(enabled|static|disabled)' >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 check_wgd_status(){
-  if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+  if _is_systemd_managed; then
     if systemctl is-active --quiet wg-dashboard; then
       return 0
     else
@@ -460,7 +472,8 @@ gunicorn_stop () {
 
 start_wgd () {
 	_checkWireguard
-	if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+	if _is_systemd_managed; then
+		export WGD_SYSTEMD_CALLED=1
 		printf "[WGDashboard] Managed by systemd. Starting wg-dashboard.service...\n"
 		sudo systemctl start wg-dashboard
 		sleep 2
@@ -475,7 +488,8 @@ start_wgd () {
 }
 
 stop_wgd() {
-	if systemctl list-unit-files wg-dashboard.service >/dev/null 2>&1; then
+	if _is_systemd_managed; then
+		export WGD_SYSTEMD_CALLED=1
 		printf "[WGDashboard] Managed by systemd. Stopping wg-dashboard.service...\n"
 		sudo systemctl stop wg-dashboard
 		printf "[WGDashboard] WGDashboard service stopped successfully.\n"

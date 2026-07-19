@@ -50,6 +50,10 @@ export default {
 				{
 					id: "wireguard_settings",
 					title: "WireGuard Configuration Settings"
+				},
+				{
+					id: "global_backup",
+					title: "Global Backup"
 				}
 			]
 		}

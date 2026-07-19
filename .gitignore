@@ -53,3 +53,8 @@ coverage
 
 *.tsbuildinfo
 .vite/*
+
+# Test and Agents
+.agents/
+scratch/
+test_backup_restore.py

@@ -33,6 +33,7 @@ from modules.PeerJobs import PeerJobs
 from modules.DashboardConfig import DashboardConfig
 from modules.WireguardConfiguration import WireguardConfiguration
 from modules.AmneziaConfiguration import AmneziaConfiguration
+from modules.GlobalBackup import GlobalBackupManager
 
 from client import createClientBlueprint
 
@@ -235,6 +236,9 @@ API Routes
 def auth_req():
     if request.method.lower() == 'options':
         return ResponseObject(True)        
+
+    if app.config.get('MAINTENANCE_MODE', False) and not request.path.endswith('/api/globalBackup/restore'):
+        return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
 
     DashboardConfig.APIAccessed = False    
     authenticationRequired = DashboardConfig.GetConfig("Server", "auth_req")[1]
@@ -590,15 +594,21 @@ def API_getAllWireguardConfigurationBackup():
                             data['NonExistingConfigurations'][name] = []
                         
                         date = s.group(2)
+                        conf_path = os.path.join(DashboardConfig.GetConfig("Server", f"{protocol}_conf_path")[1], 'WGDashboard_Backup', f)
+                        with open(conf_path, 'r', encoding='utf-8', errors='ignore') as conf_f:
+                            conf_content = conf_f.read()
                         d = {
                             "protocol": protocol,
                             "filename": f,
                             "backupDate": date,
-                            "content": open(os.path.join(DashboardConfig.GetConfig("Server", f"{protocol}_conf_path")[1], 'WGDashboard_Backup', f), 'r').read()
+                            "content": conf_content
                         }
-                        if f.replace(".conf", ".sql") in list(os.listdir(directory)):
+                        sql_filename = f.replace(".conf", ".sql")
+                        if sql_filename in os.listdir(directory):
                             d['database'] = True
-                            d['databaseContent'] = open(os.path.join(DashboardConfig.GetConfig("Server", f"{protocol}_conf_path")[1], 'WGDashboard_Backup', f.replace(".conf", ".sql")), 'r').read()
+                            sql_path = os.path.join(DashboardConfig.GetConfig("Server", f"{protocol}_conf_path")[1], 'WGDashboard_Backup', sql_filename)
+                            with open(sql_path, 'r', encoding='utf-8', errors='ignore') as sql_f:
+                                d['databaseContent'] = sql_f.read()
                         data['NonExistingConfigurations'][name].append(d)
     return ResponseObject(data=data)
 
@@ -660,7 +670,102 @@ def API_restoreWireguardConfigurationBackup():
     
     status = WireguardConfigurations[configurationName].restoreBackup(backupFileName)
     return ResponseObject(status=status, message=(None if status else 'Restore backup failed'))
+
+# ==========================================
+# GLOBAL BACKUP API ENDPOINTS
+# ==========================================
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/list')
+def API_listGlobalBackups():
+    backups = GlobalBackupManager.list_global_backups()
+    return ResponseObject(data=backups)
+
+@app.post(f'{APP_PREFIX}/api/globalBackup/create')
+def API_createGlobalBackup():
+    data = request.get_json(silent=True) or {}
+    label = data.get('label', '')
+    include_logs = data.get('includeLogs', True)
+    include_existing = data.get('includeExistingBackups', False)
     
+    status, result = GlobalBackupManager.create_global_backup(
+        label=label,
+        include_logs=include_logs,
+        include_existing_backups=include_existing
+    )
+    if not status:
+        return ResponseObject(False, f"Failed to create global backup: {result}", status_code=500)
+    
+    return ResponseObject(True, "Global backup created successfully", data=result)
+
+@app.post(f'{APP_PREFIX}/api/globalBackup/delete')
+def API_deleteGlobalBackup():
+    data = request.get_json(silent=True) or {}
+    filename = data.get('filename')
+    if not filename:
+        return ResponseObject(False, "Filename is required", status_code=400)
+    
+    status = GlobalBackupManager.delete_global_backup(filename)
+    if not status:
+        return ResponseObject(False, "Backup file not found or deletion failed", status_code=404)
+    
+    return ResponseObject(True, "Backup file deleted successfully")
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/download')
+def API_downloadGlobalBackup():
+    filename = request.args.get('filename')
+    if not filename:
+        return ResponseObject(False, "Filename is required", status_code=400)
+    
+    clean_filename = os.path.basename(filename)
+    fpath = os.path.join(GlobalBackupManager.get_backup_dir(), clean_filename)
+    if not os.path.exists(fpath):
+        return ResponseObject(False, "Backup file not found", status_code=404)
+    
+    return send_file(fpath, as_attachment=True, download_name=clean_filename)
+
+@app.post(f'{APP_PREFIX}/api/globalBackup/restore')
+def API_restoreGlobalBackup():
+    app.config['MAINTENANCE_MODE'] = True
+    try:
+        target_path = None
+        
+        if 'backupFile' in request.files:
+            file = request.files['backupFile']
+            if file and file.filename.endswith('.zip'):
+                # Validate ZIP magic bytes (PK\x03\x04)
+                header = file.read(4)
+                file.seek(0)
+                if header != b'PK\x03\x04':
+                    app.config['MAINTENANCE_MODE'] = False
+                    return ResponseObject(False, "Invalid backup file format", status_code=400)
+                
+                clean_name = os.path.basename(file.filename)
+                target_path = os.path.join(GlobalBackupManager.get_backup_dir(), f"uploaded_{uuid.uuid4().hex}_{clean_name}")
+                file.save(target_path)
+        
+        if not target_path:
+            data = request.get_json(silent=True) or {}
+            filename = data.get('filename')
+            if filename:
+                clean_name = os.path.basename(filename)
+                target_path = os.path.join(GlobalBackupManager.get_backup_dir(), clean_name)
+
+        if not target_path or not os.path.exists(target_path):
+            app.config['MAINTENANCE_MODE'] = False
+            return ResponseObject(False, "Valid backup file or filename must be provided", status_code=400)
+
+        status, message = GlobalBackupManager.restore_global_backup(target_path)
+        app.config['MAINTENANCE_MODE'] = False
+        
+        if not status:
+            return ResponseObject(False, message, status_code=500)
+        
+        return ResponseObject(True, message, data={"restart_required": True})
+        
+    except Exception as e:
+        app.config['MAINTENANCE_MODE'] = False
+        return ResponseObject(False, f"Restore execution error: {str(e)}", status_code=500)
+
 @app.get(f'{APP_PREFIX}/api/getDashboardConfiguration')
 def API_getDashboardConfiguration():
     return ResponseObject(data=DashboardConfig.toJson())

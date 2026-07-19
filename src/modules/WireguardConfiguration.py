@@ -328,7 +328,7 @@ class WireguardConfiguration:
 
     def __dumpDatabase(self):
         with self.engine.connect() as conn:
-            tables = [self.peersTable, self.peersRestrictedTable, self.peersTransferTable, self.peersDeletedTable]
+            tables = [self.peersTable, self.peersRestrictedTable, self.peersTransferTable, self.peersDeletedTable, self.peersHistoryEndpointTable]
             for i in tables:
                 rows = conn.execute(i.select()).mappings().fetchall()
                 for row in rows:
@@ -1046,6 +1046,9 @@ class WireguardConfiguration:
         backups = []
 
         directory = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup')
+        if not os.path.exists(directory):
+            return []
+
         files = [(file, os.path.getctime(os.path.join(directory, file)))
                  for file in os.listdir(directory) if os.path.isfile(os.path.join(directory, file))]
         files.sort(key=lambda x: x[1], reverse=True)
@@ -1055,15 +1058,21 @@ class WireguardConfiguration:
             if RegexMatch(pattern, f):
                 s = re.search(pattern, f)
                 date = s.group(2)
+                conf_file_path = os.path.join(directory, f)
+                with open(conf_file_path, 'r', encoding='utf-8', errors='ignore') as conf_file:
+                    conf_content = conf_file.read()
                 d = {
                     "filename": f,
                     "backupDate": date,
-                    "content": open(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', f), 'r').read()
+                    "content": conf_content
                 }
-                if f.replace(".conf", ".sql") in list(os.listdir(directory)):
+                sql_filename = f.replace(".conf", ".sql")
+                if sql_filename in os.listdir(directory):
                     d['database'] = True
                     if databaseContent:
-                        d['databaseContent'] = open(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', f.replace(".conf", ".sql")), 'r').read()
+                        sql_file_path = os.path.join(directory, sql_filename)
+                        with open(sql_file_path, 'r', encoding='utf-8', errors='ignore') as sql_file:
+                            d['databaseContent'] = sql_file.read()
                 backups.append(d)
 
         return backups
@@ -1078,24 +1087,47 @@ class WireguardConfiguration:
         targetSQL = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backupFileName.replace(".conf", ".sql"))
         if not os.path.exists(target):
             return False
-        targetContent = open(target, 'r').read()
+
+        # Backup current config content for rollback
+        original_content = None
+        if os.path.exists(self.configPath):
+            with open(self.configPath, 'r', encoding='utf-8', errors='ignore') as f:
+                original_content = f.read()
+
+        with open(target, 'r', encoding='utf-8', errors='ignore') as f:
+            targetContent = f.read()
+
         try:
-            with open(self.configPath, 'w') as f:
+            with open(self.configPath, 'w', encoding='utf-8') as f:
                 f.write(targetContent)
+            self.__parseConfigurationFile()
+            self.__importDatabase(targetSQL, restore=True)
+            self.__initPeersList()
+            return True
         except Exception as e:
+            current_app.logger.error(f"Restoring backup failed: {e}")
+            if original_content is not None:
+                with open(self.configPath, 'w', encoding='utf-8') as f:
+                    f.write(original_content)
+                try:
+                    self.__parseConfigurationFile()
+                except Exception:
+                    pass
             return False
-        self.__parseConfigurationFile()
-        self.__importDatabase(targetSQL)
-        self.__initPeersList()
-        return True
 
     def deleteBackup(self, backupFileName: str) -> bool:
         backups = list(map(lambda x : x['filename'], self.getBackups()))
         if backupFileName not in backups:
             return False
         try:
-            os.remove(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backupFileName))
+            conf_path = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backupFileName)
+            sql_path = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backupFileName.replace(".conf", ".sql"))
+            if os.path.exists(conf_path):
+                os.remove(conf_path)
+            if os.path.exists(sql_path):
+                os.remove(sql_path)
         except Exception as e:
+            current_app.logger.error(f"Deleting backup failed: {e}")
             return False
         return True
 
@@ -1103,19 +1135,22 @@ class WireguardConfiguration:
         backup = list(filter(lambda x : x['filename'] == backupFileName, self.getBackups()))
         if len(backup) == 0:
             return False, None
-        zip = f'{str(uuid.UUID(int=random.Random().getrandbits(128), version=4))}.zip'
-        with ZipFile(os.path.join('download', zip), 'w') as zipF:
+        zip_name = f'{str(uuid.UUID(int=random.Random().getrandbits(128), version=4))}.zip'
+        download_dir = 'download'
+        os.makedirs(download_dir, exist_ok=True)
+        zip_path = os.path.join(download_dir, zip_name)
+        with ZipFile(zip_path, 'w') as zipF:
             zipF.write(
                 os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backup[0]['filename']),
                 os.path.basename(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backup[0]['filename']))
             )
-            if backup[0]['database']:
-                zipF.write(
-                    os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backup[0]['filename'].replace('.conf', '.sql')),
-                    os.path.basename(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backup[0]['filename'].replace('.conf', '.sql')))
-                )
+            if backup[0].get('database', False):
+                sql_file = backup[0]['filename'].replace('.conf', '.sql')
+                sql_path = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', sql_file)
+                if os.path.exists(sql_path):
+                    zipF.write(sql_path, os.path.basename(sql_path))
 
-        return True, zip
+        return True, zip_name
 
     def updateConfigurationSettings(self, newData: dict) -> tuple[bool, str]:
         if self.Status:

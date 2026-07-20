@@ -13,7 +13,7 @@
 				<LocaleText t="Critical system snapshot and restoration utility. Proceed with caution." />
 			</p>
 
-			<div class="d-flex gap-2 mb-4 align-items-start">
+			<div class="d-flex flex-column flex-sm-row gap-2 mb-4">
 				<div class="flex-grow-1">
 					<button class="btn rounded-3 w-100" :class="creating ? 'btn-secondary' : 'btn-primary'" @click="createBackup()" :disabled="creating">
 						<span v-if="creating" class="spinner-border spinner-border-sm"></span>
@@ -21,14 +21,15 @@
 					</button>
 				</div>
 				
-				<button class="btn btn-outline-secondary rounded-3" @click="getBackups()" :disabled="loading" :title="GetLocale('Refresh')">
-					<i class="bi bi-arrow-clockwise"></i>
-				</button>
-				
-				<input type="file" ref="fileInput" @change="uploadBackup" accept=".zip" style="display: none;" />
-				<button class="btn btn-outline-secondary rounded-3" @click="$refs.fileInput.click()" :disabled="loading" :title="GetLocale('Upload Archive')">
-					<i class="bi bi-upload"></i>
-				</button>
+				<div class="d-flex gap-2">
+					<input type="file" ref="fileInput" @change="uploadBackup" accept=".zip" style="display: none;" />
+					<button class="btn btn-outline-primary rounded-3 text-nowrap px-3" @click="$refs.fileInput.click()" :disabled="loading" :title="GetLocale('Upload Archive')">
+						<i class="bi bi-upload me-1"></i> <LocaleText t="Upload Archive" />
+					</button>
+					<button class="btn btn-outline-secondary rounded-3 px-3" @click="getBackups()" :disabled="loading" :title="GetLocale('Refresh')">
+						<i class="bi bi-arrow-clockwise"></i>
+					</button>
+				</div>
 			</div>
 
 			<div class="table-responsive">

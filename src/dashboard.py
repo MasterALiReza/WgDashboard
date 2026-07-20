@@ -136,7 +136,7 @@ def globalBackupBackgroundThread():
         app.logger.info("Background Thread #3 PID:" + str(threading.get_native_id()))
         
         # Initialize last_backup_time from existing backups if possible
-        last_backup_time = datetime.now()
+        last_backup_time = datetime.fromtimestamp(0)
         backups = GlobalBackupManager.list_global_backups()
         for b in backups:
             if b['label'].startswith("Auto_"):
@@ -167,8 +167,12 @@ def globalBackupBackgroundThread():
                             
                         if should_backup:
                             app.logger.info(f"Starting scheduled global backup ({schedule})")
-                            GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
-                            last_backup_time = now
+                            success, result = GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
+                            if success:
+                                last_backup_time = now
+                                app.logger.info(f"Scheduled global backup completed successfully: {result.get('filename') if isinstance(result, dict) else result}")
+                            else:
+                                app.logger.error(f"Scheduled global backup failed: {result}")
             except Exception as e:
                 app.logger.error(f"Background Thread #3 Error: {e}")
             time.sleep(60)

@@ -135,9 +135,24 @@ class GlobalBackupManager:
             configs_target = os.path.join(temp_dir, 'configs')
             os.makedirs(configs_target, exist_ok=True)
             
+            wg_conf_path = "/etc/wireguard"
+            awg_conf_path = "/etc/amnezia/amneziawg"
+            if os.path.exists(ini_file):
+                try:
+                    import configparser
+                    config = configparser.ConfigParser()
+                    config.read(ini_file)
+                    if 'Server' in config:
+                        if 'wg_conf_path' in config['Server']:
+                            wg_conf_path = config['Server']['wg_conf_path']
+                        if 'awg_conf_path' in config['Server']:
+                            awg_conf_path = config['Server']['awg_conf_path']
+                except Exception:
+                    pass
+            
             search_paths = [
-                ("wireguard", "/etc/wireguard"),
-                ("amnezia", "/etc/amnezia/amneziawg")
+                ("wireguard", wg_conf_path),
+                ("amnezia", awg_conf_path)
             ]
             for conf_type, sp in search_paths:
                 if os.path.exists(sp) and os.path.isdir(sp):
@@ -323,6 +338,22 @@ class GlobalBackupManager:
             configs_src = os.path.join(temp_extract, 'configs')
             if os.path.exists(configs_src) and os.path.isdir(configs_src):
                 target_wg = "/etc/wireguard"
+                target_amnezia = "/etc/amnezia/amneziawg"
+                
+                restored_ini = os.path.join(temp_extract, 'wg-dashboard.ini')
+                if os.path.exists(restored_ini):
+                    try:
+                        import configparser
+                        config = configparser.ConfigParser()
+                        config.read(restored_ini)
+                        if 'Server' in config:
+                            if 'wg_conf_path' in config['Server']:
+                                target_wg = config['Server']['wg_conf_path']
+                            if 'awg_conf_path' in config['Server']:
+                                target_amnezia = config['Server']['awg_conf_path']
+                    except Exception:
+                        pass
+                        
                 os.makedirs(target_wg, exist_ok=True)
                 
                 # Backwards compatibility: root .conf files are wireguard
@@ -339,7 +370,6 @@ class GlobalBackupManager:
                             
                 amnezia_src = os.path.join(configs_src, 'amnezia')
                 if os.path.exists(amnezia_src) and os.path.isdir(amnezia_src):
-                    target_amnezia = "/etc/amnezia/amneziawg"
                     os.makedirs(target_amnezia, exist_ok=True)
                     for fname in os.listdir(amnezia_src):
                         if fname.endswith('.conf'):

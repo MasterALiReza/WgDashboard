@@ -160,11 +160,14 @@ export default {
 			return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 		},
 		formatDate(dateStr) {
-			const d = new Date(dateStr);
-			// Display as: Sun, 20 Jul 2026 · 14:30:45 UTC
-			const options = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' };
-			return d.toLocaleDateString('en-US', options).replace(',', '').replace(' PM', '').replace(' AM', ''); 
-		},
+				if (!dateStr) return 'N/A';
+				const d = new Date(dateStr);
+				if (isNaN(d.getTime())) return dateStr;
+				// Display as: Sun, 20 Jul 2026 · 14:30:45
+				const datePart = d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+				const timePart = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+				return `${datePart} · ${timePart}`;
+			},
 		toggleSort() {
 			this.sort_descending = !this.sort_descending;
 		},

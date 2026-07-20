@@ -54,7 +54,7 @@
 					<tbody>
 						<tr v-for="backup in backups" :key="backup.filename">
 							<td><small class="fw-bold">{{ backup.filename }}</small></td>
-							<td><small class="text-muted">{{ formatDate(backup.date) }}</small></td>
+							<td><small class="text-muted">{{ formatDate(backup.created) }}</small></td>
 							<td><small class="text-muted">{{ formatSize(backup.size) }}</small></td>
 							<td class="text-end">
 								<div class="btn-group">
@@ -117,7 +117,7 @@ export default {
 			this.loading = true;
 			await fetchGet("/api/globalBackup/list", {}, (res) => {
 				if (res.status) {
-					this.backups = res.data.sort((a, b) => new Date(b.date) - new Date(a.date));
+					this.backups = res.data.sort((a, b) => new Date(b.created) - new Date(a.created));
 				} else {
 					this.store.newMessage("WGDashboard", res.message, "danger");
 				}

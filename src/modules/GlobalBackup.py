@@ -209,6 +209,9 @@ class GlobalBackupManager:
             # Clean up temp
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+            # Enforce retention policy
+            GlobalBackupManager.enforce_retention_policy(10)
+
             return True, {
                 "filename": zip_filename,
                 "size": os.path.getsize(zip_filepath),
@@ -259,6 +262,18 @@ class GlobalBackupManager:
             os.remove(fpath)
             return True
         return False
+
+    @staticmethod
+    def enforce_retention_policy(max_backups: int = 10) -> bool:
+        try:
+            backups = GlobalBackupManager.list_global_backups()
+            if len(backups) > max_backups:
+                to_delete = backups[max_backups:]
+                for b in to_delete:
+                    GlobalBackupManager.delete_global_backup(b['filename'])
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def validate_backup_manifest(zip_filepath: str) -> tuple[bool, str | dict]:

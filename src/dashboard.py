@@ -130,6 +130,49 @@ def peerJobScheduleBackgroundThread():
                 app.logger.error(f"Background Thread #2 Error: {e}")
             time.sleep(180)
 
+def globalBackupBackgroundThread():
+    with app.app_context():
+        app.logger.info("Background Thread #3 Started (Global Backup)")
+        app.logger.info("Background Thread #3 PID:" + str(threading.get_native_id()))
+        
+        # Initialize last_backup_time from existing backups if possible
+        last_backup_time = datetime.now()
+        backups = GlobalBackupManager.list_global_backups()
+        for b in backups:
+            if b['label'].startswith("Auto_"):
+                try:
+                    last_backup_time = datetime.fromisoformat(b['created'])
+                except:
+                    pass
+                break # Since backups are sorted newest first, this is the latest Auto backup
+
+        while True:
+            try:
+                auto_backup_status, auto_backup = DashboardConfig.GetConfig("GlobalBackup", "auto_backup")
+                if auto_backup_status and auto_backup:
+                    schedule_status, schedule = DashboardConfig.GetConfig("GlobalBackup", "auto_backup_schedule")
+                    if schedule_status and schedule:
+                        now = datetime.now()
+                        time_diff = now - last_backup_time
+                        should_backup = False
+                        
+                        if schedule == "12h" and time_diff.total_seconds() >= 12 * 3600:
+                            should_backup = True
+                        elif schedule == "daily" and time_diff.total_seconds() >= 24 * 3600:
+                            should_backup = True
+                        elif schedule == "weekly" and time_diff.total_seconds() >= 7 * 24 * 3600:
+                            should_backup = True
+                        elif schedule == "monthly" and time_diff.total_seconds() >= 30 * 24 * 3600:
+                            should_backup = True
+                            
+                        if should_backup:
+                            app.logger.info(f"Starting scheduled global backup ({schedule})")
+                            GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
+                            last_backup_time = now
+            except Exception as e:
+                app.logger.error(f"Background Thread #3 Error: {e}")
+            time.sleep(60)
+
 def gunicornConfig():
     _, app_ip = DashboardConfig.GetConfig("Server", "app_ip")
     _, app_port = DashboardConfig.GetConfig("Server", "app_port")
@@ -185,6 +228,8 @@ def startThreads():
     bgThread.start()
     scheduleJobThread = threading.Thread(target=peerJobScheduleBackgroundThread, daemon=True)
     scheduleJobThread.start()
+    backupThread = threading.Thread(target=globalBackupBackgroundThread, daemon=True)
+    backupThread.start()
 
 dictConfig({
     'version': 1,
@@ -769,6 +814,15 @@ def API_restoreGlobalBackup():
 @app.get(f'{APP_PREFIX}/api/getDashboardConfiguration')
 def API_getDashboardConfiguration():
     return ResponseObject(data=DashboardConfig.toJson())
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/settings')
+def API_getGlobalBackupSettings():
+    _, auto_backup = DashboardConfig.GetConfig("GlobalBackup", "auto_backup")
+    _, schedule = DashboardConfig.GetConfig("GlobalBackup", "auto_backup_schedule")
+    return ResponseObject(data={
+        "auto_backup": auto_backup,
+        "auto_backup_schedule": schedule
+    })
 
 @app.post(f'{APP_PREFIX}/api/updateDashboardConfigurationItem')
 def API_updateDashboardConfigurationItem():

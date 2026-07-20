@@ -58,6 +58,10 @@ class DashboardConfig:
             "Other": {
                 "welcome_session": "true"
             },
+            "GlobalBackup": {
+                "auto_backup": "false",
+                "auto_backup_schedule": "daily"
+            },
             "Database":{
                 "type": "sqlite",
                 "host": "",

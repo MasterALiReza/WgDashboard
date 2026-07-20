@@ -2,7 +2,7 @@
 	<div class="card mb-4">
 		<div class="card-header d-flex justify-content-between align-items-center">
 			<h6 class="my-2">
-				<LocaleText t="GLOBAL_BACKUP_SYSTEM" />
+				<LocaleText t="Global Backup System" />
 			</h6>
 			<span class="badge" :class="{'text-bg-warning': loading, 'text-bg-success': !loading}">
 				{{ loading ? GetLocale('SYNCING') : GetLocale('ONLINE') }}
@@ -17,7 +17,7 @@
 				<div class="flex-grow-1">
 					<button class="btn rounded-3 w-100" :class="creating ? 'btn-secondary' : 'btn-primary'" @click="createBackup()" :disabled="creating">
 						<span v-if="creating" class="spinner-border spinner-border-sm"></span>
-						<span v-else><i class="bi bi-plus-circle me-1"></i> <LocaleText t="INITIATE_FULL_BACKUP" /></span>
+						<span v-else><i class="bi bi-plus-circle me-1"></i> <LocaleText t="Create Global Backup" /></span>
 					</button>
 				</div>
 				
@@ -70,21 +70,21 @@
 			<div class="table-responsive">
 				<div v-if="loading && backups.length === 0" class="text-center py-5 text-muted">
 					<span class="spinner-border spinner-border-sm me-2"></span>
-					<LocaleText t="RETRIEVING_DATA..." />
+					<LocaleText t="Retrieving data..." />
 				</div>
 				
 				<div v-else-if="backups.length === 0" class="text-center py-5 text-muted">
 					<i class="bi bi-inbox fs-1 d-block mb-3"></i>
-					<small><strong><LocaleText t="NO_ARCHIVES_FOUND" /></strong></small>
+					<small><strong><LocaleText t="No backup archives found" /></strong></small>
 				</div>
 
 				<table v-else class="table table-hover align-middle mb-0">
 					<thead>
 						<tr>
-							<th class="text-muted border-0"><small><LocaleText t="ARCHIVE_ID" /></small></th>
-							<th class="text-muted border-0"><small><LocaleText t="TIMESTAMP" /></small></th>
-							<th class="text-muted border-0"><small><LocaleText t="VOLUME" /></small></th>
-							<th class="text-end text-muted border-0"><small><LocaleText t="OPERATIONS" /></small></th>
+							<th class="text-muted border-0"><small><LocaleText t="Archive Name" /></small></th>
+							<th class="text-muted border-0"><small><LocaleText t="Date Created" /></small></th>
+							<th class="text-muted border-0"><small><LocaleText t="File Size" /></small></th>
+							<th class="text-end text-muted border-0"><small><LocaleText t="Actions" /></small></th>
 						</tr>
 					</thead>
 					<tbody>

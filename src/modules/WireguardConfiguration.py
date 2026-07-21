@@ -694,6 +694,7 @@ class WireguardConfiguration:
         if not self.__wgSave():
             return False, "Failed to save configuration through WireGuard"
         self.getPeers()
+        self.getRestrictedPeers()
         return True, "Allow access successfully"
 
     def restrictPeers(self, listOfPublicKeys, reason=None) -> tuple[bool, str]:
@@ -801,6 +802,7 @@ class WireguardConfiguration:
             return False, "Failed to save configuration through WireGuard"
 
         self.getPeers()
+        self.getRestrictedPeers()
         
         if numOfDeletedPeers == 0 and numOfFailedToDeletePeers == 0:
             return False, "No peer(s) to delete found"

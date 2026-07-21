@@ -156,15 +156,9 @@ const toggleConfiguration = async () => {
 const configurationSummary = computed(() => {
 	return {
 		connectedPeers: configurationPeers.value.filter(x => x.status === "running").length,
-		totalUsage: configurationPeers.value.length > 0 ?
-			configurationPeers.value.filter(x => !x.restricted)
-				.map(x => x.total_data + x.cumu_data).reduce((a, b) => a + b, 0).toFixed(4) : 0,
-		totalReceive: configurationPeers.value.length > 0 ?
-			configurationPeers.value.filter(x => !x.restricted)
-				.map(x => x.total_receive + x.cumu_receive).reduce((a, b) => a + b, 0).toFixed(4) : 0,
-		totalSent: configurationPeers.value.length > 0 ?
-			configurationPeers.value.filter(x => !x.restricted)
-				.map(x => x.total_sent + x.cumu_sent).reduce((a, b) => a + b, 0).toFixed(4) : 0
+		totalUsage: configurationInfo.value?.DataUsage?.Total ? configurationInfo.value.DataUsage.Total.toFixed(4) : 0,
+		totalReceive: configurationInfo.value?.DataUsage?.Receive ? configurationInfo.value.DataUsage.Receive.toFixed(4) : 0,
+		totalSent: configurationInfo.value?.DataUsage?.Sent ? configurationInfo.value.DataUsage.Sent.toFixed(4) : 0
 	}
 })
 

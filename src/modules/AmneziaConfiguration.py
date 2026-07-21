@@ -62,9 +62,9 @@ class AmneziaConfiguration(WireguardConfiguration):
             "SaveConfig": self.SaveConfig,
             "Info": self.configurationInfo.model_dump(),
             "DataUsage": {
-                "Total": sum(list(map(lambda x: x.cumu_data + x.total_data, self.Peers))) + sum(list(map(lambda x: x.cumu_data + x.total_data, self.RestrictedPeers))) + snap_total,
-                "Sent": sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.Peers))) + sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.RestrictedPeers))) + snap_sent,
-                "Receive": sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.Peers))) + sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.RestrictedPeers))) + snap_receive
+                "Total": sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.RestrictedPeers))) + snap_total,
+                "Sent": sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.RestrictedPeers))) + snap_sent,
+                "Receive": sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.RestrictedPeers))) + snap_receive
             },
             "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))),
             "TotalPeers": len(self.Peers),

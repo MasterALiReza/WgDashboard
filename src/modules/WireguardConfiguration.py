@@ -237,7 +237,7 @@ class WireguardConfiguration:
             self.Status = self.getStatus()
 
     def __dropDatabase(self):
-        existingTables = [self.Name, f'{self.Name}_restrict_access', f'{self.Name}_transfer', f'{self.Name}_deleted']
+        existingTables = [self.Name, f'{self.Name}_restrict_access', f'{self.Name}_transfer', f'{self.Name}_deleted', f'{self.Name}_traffic_snapshot']
         try:
             with self.engine.begin() as conn:
                 for t in existingTables:
@@ -324,11 +324,21 @@ class WireguardConfiguration:
             extend_existing=True
         )
 
+        self.interfaceTrafficSnapshotTable = sqlalchemy.Table(
+            f'{dbName}_traffic_snapshot', self.metadata,
+            sqlalchemy.Column('configuration_name', sqlalchemy.String(255), primary_key=True),
+            sqlalchemy.Column('total_receive', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('total_sent', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('total_data', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('last_updated', time_col_type, server_default=sqlalchemy.func.now()),
+            extend_existing=True
+        )
+
         self.metadata.create_all(self.engine)
 
     def __dumpDatabase(self):
         with self.engine.connect() as conn:
-            tables = [self.peersTable, self.peersRestrictedTable, self.peersTransferTable, self.peersDeletedTable, self.peersHistoryEndpointTable]
+            tables = [self.peersTable, self.peersRestrictedTable, self.peersTransferTable, self.peersDeletedTable, self.peersHistoryEndpointTable, self.interfaceTrafficSnapshotTable]
             for i in tables:
                 rows = conn.execute(i.select()).mappings().fetchall()
                 for row in rows:
@@ -761,6 +771,11 @@ class WireguardConfiguration:
                     for shareLink in pf.ShareLink:
                         AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
                     try:
+                        peer_total_receive = (pf.cumu_receive or 0) + (pf.total_receive or 0)
+                        peer_total_sent    = (pf.cumu_sent or 0) + (pf.total_sent or 0)
+                        peer_total_data    = (pf.cumu_data or 0) + (pf.total_data or 0)
+                        self._add_to_traffic_snapshot(conn, peer_total_receive, peer_total_sent, peer_total_data)
+                        
                         if not is_restricted:
                             try:
                                 command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
@@ -999,8 +1014,60 @@ class WireguardConfiguration:
         self.getRestrictedPeers()
         return self.RestrictedPeers
 
+    def _get_traffic_snapshot(self):
+        try:
+            with self.engine.connect() as conn:
+                existing = conn.execute(
+                    self.interfaceTrafficSnapshotTable.select().where(
+                        self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
+                    )
+                ).mappings().first()
+                if existing:
+                    return dict(existing)
+        except Exception as e:
+            current_app.logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
+        return None
+
+    def _add_to_traffic_snapshot(self, conn, recv, sent, total):
+        try:
+            existing = conn.execute(
+                self.interfaceTrafficSnapshotTable.select().where(
+                    self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
+                )
+            ).mappings().first()
+            
+            if existing:
+                conn.execute(
+                    self.interfaceTrafficSnapshotTable.update()
+                    .where(self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name)
+                    .values(
+                        total_receive = existing['total_receive'] + recv,
+                        total_sent    = existing['total_sent'] + sent,
+                        total_data    = existing['total_data'] + total,
+                        last_updated  = datetime.now()
+                    )
+                )
+            else:
+                conn.execute(
+                    self.interfaceTrafficSnapshotTable.insert().values(
+                        configuration_name = self.Name,
+                        total_receive = recv,
+                        total_sent    = sent,
+                        total_data    = total,
+                        last_updated  = datetime.now()
+                    )
+                )
+        except Exception as e:
+            current_app.logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
+
     def toJson(self):
         self.Status = self.getStatus()
+        
+        snapshot = self._get_traffic_snapshot()
+        snap_total = snapshot.get('total_data', 0) if snapshot else 0
+        snap_sent = snapshot.get('total_sent', 0) if snapshot else 0
+        snap_receive = snapshot.get('total_receive', 0) if snapshot else 0
+        
         return {
             "Status": self.Status,
             "Name": self.Name,
@@ -1014,9 +1081,9 @@ class WireguardConfiguration:
             "PostDown": self.PostDown,
             "SaveConfig": self.SaveConfig,
             "DataUsage": {
-                "Total": sum(list(map(lambda x: x.cumu_data + x.total_data, self.Peers))),
-                "Sent": sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.Peers))),
-                "Receive": sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.Peers)))
+                "Total": sum(list(map(lambda x: x.cumu_data + x.total_data, self.Peers))) + sum(list(map(lambda x: x.cumu_data + x.total_data, self.RestrictedPeers))) + snap_total,
+                "Sent": sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.Peers))) + sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.RestrictedPeers))) + snap_sent,
+                "Receive": sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.Peers))) + sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.RestrictedPeers))) + snap_receive
             },
             "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))),
             "TotalPeers": len(self.Peers),

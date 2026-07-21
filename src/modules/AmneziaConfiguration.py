@@ -42,6 +42,12 @@ class AmneziaConfiguration(WireguardConfiguration):
 
     def toJson(self):
         self.Status = self.getStatus()
+        
+        snapshot = self._get_traffic_snapshot()
+        snap_total = snapshot.get('total_data', 0) if snapshot else 0
+        snap_sent = snapshot.get('total_sent', 0) if snapshot else 0
+        snap_receive = snapshot.get('total_receive', 0) if snapshot else 0
+        
         return {
             "Status": self.Status,
             "Name": self.Name,
@@ -56,9 +62,9 @@ class AmneziaConfiguration(WireguardConfiguration):
             "SaveConfig": self.SaveConfig,
             "Info": self.configurationInfo.model_dump(),
             "DataUsage": {
-                "Total": sum(list(map(lambda x: x.cumu_data + x.total_data, self.Peers))),
-                "Sent": sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.Peers))),
-                "Receive": sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.Peers)))
+                "Total": sum(list(map(lambda x: x.cumu_data + x.total_data, self.Peers))) + sum(list(map(lambda x: x.cumu_data + x.total_data, self.RestrictedPeers))) + snap_total,
+                "Sent": sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.Peers))) + sum(list(map(lambda x: x.cumu_sent + x.total_sent, self.RestrictedPeers))) + snap_sent,
+                "Receive": sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.Peers))) + sum(list(map(lambda x: x.cumu_receive + x.total_receive, self.RestrictedPeers))) + snap_receive
             },
             "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))),
             "TotalPeers": len(self.Peers),
@@ -152,6 +158,16 @@ class AmneziaConfiguration(WireguardConfiguration):
             'ConfigurationsInfo', self.metadata,
             sqlalchemy.Column('ID', sqlalchemy.String(255), primary_key=True),
             sqlalchemy.Column('Info', sqlalchemy.Text),
+            extend_existing=True
+        )
+
+        self.interfaceTrafficSnapshotTable = sqlalchemy.Table(
+            f'{dbName}_traffic_snapshot', self.metadata,
+            sqlalchemy.Column('configuration_name', sqlalchemy.String(255), primary_key=True),
+            sqlalchemy.Column('total_receive', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('total_sent', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('total_data', sqlalchemy.Float, server_default='0.0'),
+            sqlalchemy.Column('last_updated', time_col_type, server_default=sqlalchemy.func.now()),
             extend_existing=True
         )
 

@@ -1008,7 +1008,7 @@ class WireguardConfiguration:
         return True, None
 
     def getPeersList(self):
-        return self.Peers
+        return self.Peers + self.getRestrictedPeersList()
 
     def getRestrictedPeersList(self) -> list:
         self.getRestrictedPeers()

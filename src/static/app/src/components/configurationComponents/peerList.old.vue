@@ -289,15 +289,9 @@ export default {
 		configurationSummary(){
 			return {
 				connectedPeers: this.configurationPeers.filter(x => x.status === "running").length,
-				totalUsage: this.configurationPeers.length > 0 ? 
-					this.configurationPeers.filter(x => !x.restricted)
-						.map(x => x.total_data + x.cumu_data).reduce((a, b) => a + b, 0).toFixed(4) : 0,
-				totalReceive: this.configurationPeers.length > 0 ? 
-					this.configurationPeers.filter(x => !x.restricted)
-						.map(x => x.total_receive + x.cumu_receive).reduce((a, b) => a + b, 0).toFixed(4) : 0,
-				totalSent: this.configurationPeers.length > 0 ? 
-					this.configurationPeers.filter(x => !x.restricted)
-						.map(x => x.total_sent + x.cumu_sent).reduce((a, b) => a + b, 0).toFixed(4) : 0
+				totalUsage: this.configurationInfo?.DataUsage?.Total ? this.configurationInfo.DataUsage.Total.toFixed(4) : 0,
+				totalReceive: this.configurationInfo?.DataUsage?.Receive ? this.configurationInfo.DataUsage.Receive.toFixed(4) : 0,
+				totalSent: this.configurationInfo?.DataUsage?.Sent ? this.configurationInfo.DataUsage.Sent.toFixed(4) : 0
 			}
 		},
 		receiveData(){

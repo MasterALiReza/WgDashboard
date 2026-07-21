@@ -456,18 +456,28 @@ gunicorn_start () {
 }
 
 gunicorn_stop () {
-	checkPIDExist=1
-	while [ $checkPIDExist -eq 1 ]
-	do
-		if test -f "$PID_FILE"; then
-			printf "[WGDashboard] Stopping WGDashboard w/ Gunicorn on PID %s\n" "$(cat ./gunicorn.pid)"
-			sudo kill "$(cat ./gunicorn.pid)"
-		else
-			checkPIDExist=0
+	if test -f "$PID_FILE"; then
+		local pid=$(cat ./gunicorn.pid)
+		printf "[WGDashboard] Stopping WGDashboard w/ Gunicorn on PID %s" "$pid"
+		sudo kill "$pid" 2>/dev/null || true
+		
+		local count=0
+		while [ -f "$PID_FILE" ] && [ $count -lt 20 ]; do
+			printf "."
+			sleep 2
+			count=$((count+1))
+		done
+		
+		if [ -f "$PID_FILE" ]; then
+		    printf "\n[WGDashboard] Force killing Gunicorn (timeout reached)\n"
+		    sudo kill -9 "$pid" 2>/dev/null || true
+		    sudo rm -f "$PID_FILE"
 		fi
-		sleep 2
-	done
-	printf "[WGDashboard] WGDashboard is stopped.\n"
+		
+		printf "\n[WGDashboard] WGDashboard is stopped.\n"
+	else
+		printf "[WGDashboard] WGDashboard is not running.\n"
+	fi
 }
 
 start_wgd () {

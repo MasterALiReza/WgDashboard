@@ -638,9 +638,10 @@ class WireguardConfiguration:
     def searchPeer(self, publicKey):
         if not publicKey or not CheckPeerKey(publicKey):
             return False, None
-        if not hasattr(self, '_peers_dict_cache_id') or self._peers_dict_cache_id != id(self.Peers):
-            self._peers_dict = {p.id: p for p in self.Peers}
-            self._peers_dict_cache_id = id(self.Peers)
+        peers = self.getPeersList()
+        if not hasattr(self, '_peers_dict_cache_id') or getattr(self, '_peers_dict_cache_id', None) != id(peers):
+            self._peers_dict = {p.id: p for p in peers}
+            self._peers_dict_cache_id = id(peers)
             
         p = self._peers_dict.get(publicKey)
         if p is not None:
@@ -1010,11 +1011,11 @@ class WireguardConfiguration:
         return True, None
 
     def getPeersList(self):
-        return self.Peers + self.getRestrictedPeersList()
+        return (self.Peers or []) + (self.getRestrictedPeersList() or [])
 
     def getRestrictedPeersList(self) -> list:
         self.getRestrictedPeers()
-        return self.RestrictedPeers
+        return self.RestrictedPeers or []
 
     def _get_traffic_snapshot(self):
         try:

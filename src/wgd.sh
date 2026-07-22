@@ -462,18 +462,19 @@ gunicorn_stop () {
 		sudo kill "$pid" 2>/dev/null || true
 		
 		local count=0
-		while [ -f "$PID_FILE" ] && [ $count -lt 20 ]; do
+		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 25 ]; do
 			printf "."
-			sleep 2
+			sleep 1
 			count=$((count+1))
 		done
 		
-		if [ -f "$PID_FILE" ]; then
+		if kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ]; then
 		    printf "\n[WGDashboard] Force killing Gunicorn (timeout reached)\n"
 		    sudo kill -9 "$pid" 2>/dev/null || true
 		    sudo rm -f "$PID_FILE"
 		fi
 		
+		sleep 2
 		printf "\n[WGDashboard] WGDashboard is stopped.\n"
 	else
 		printf "[WGDashboard] WGDashboard is not running.\n"
@@ -506,7 +507,7 @@ stop_wgd() {
 	elif test -f "$PID_FILE"; then
 		gunicorn_stop
 	else
-		kill "$(ps aux | grep "[p]ython3 $app_name" | awk '{print $2}')"
+		kill "$(ps aux | grep "[p]ython3 $app_name" | awk '{print $2}')" 2>/dev/null || true
 	fi
 }
 
@@ -587,6 +588,7 @@ else
 	elif [ "$1" = "restart" ]; then
 		if check_wgd_status; then
 			stop_wgd
+			sleep 2
 			start_wgd
 		else
 			start_wgd

@@ -75,6 +75,7 @@ class WireguardConfiguration:
         self.engine: sqlalchemy.Engine = sqlalchemy.create_engine(ConnectionString("wgdashboard"))
         self.metadata: sqlalchemy.MetaData = sqlalchemy.MetaData()
         self.dbType = self.DashboardConfig.GetConfig("Database", "type")[1]
+        self._last_stats_refresh_time = 0  # Debounce cache timestamp
 
         if name is not None:
             if data is not None and "Backup" in data.keys():
@@ -500,14 +501,20 @@ class WireguardConfiguration:
                                 allowed_ip=sqlalchemy.bindparam('b_allowed_ip')
                             )
                             conn.execute(stmt, updates)
+                    # Assign only after ALL DB operations succeed
+                    self.Peers = tmpList
                 except Exception as e:
                     current_app.logger.error(f"{self.Name} getPeers() Error: {e}")
+                    # Do NOT update self.Peers on error; keep previous valid state
         else:
-            with self.engine.connect() as conn:
-                existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
-                for i in existingPeers:
-                    tmpList.append(Peer(i, self))
-        self.Peers = tmpList
+            # When the configuration hasn't changed, self.Peers is already up-to-date
+            # in memory from a previous call. Only load from DB if first run.
+            if not self.Peers:
+                with self.engine.connect() as conn:
+                    existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
+                    for i in existingPeers:
+                        tmpList.append(Peer(i, self))
+                self.Peers = tmpList
     
     def logPeersTraffic(self):
         inserts = []
@@ -827,166 +834,157 @@ class WireguardConfiguration:
             current_app.logger.error(f"Failed to process command:\n{str(e)}")
             return False, "Internal server error"
 
-    def getPeersLatestHandshake(self):
+    def refreshPeersRuntimeStats(self):
         try:
+            # Debounce: Prevent executing wg dump more than once every 5 seconds
+            current_time = time.time()
+            if current_time - self._last_stats_refresh_time < 5:
+                return
+            self._last_stats_refresh_time = current_time
+
             if not self.getStatus():
-                self.toggleConfiguration()
+                return "stopped"
+                
             try:
-                command = [self.Protocol, "show", self.Name, "latest-handshakes"]
-                latestHandshake = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                command = [self.Protocol, "show", self.Name, "dump"]
+                raw_dump = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
             except subprocess.CalledProcessError:
                 return "stopped"
-            latestHandshake = latestHandshake.decode("UTF-8").split()
-            count = 0
+
+            lines = raw_dump.decode("UTF-8").strip().split("\n")
+            if len(lines) <= 1:
+                return
+
             now = datetime.now()
             time_delta = timedelta(minutes=3)
 
-            updates = []
-            peer_dict = {p.id: p for p in self.Peers}
-            for _ in range(int(len(latestHandshake) / 2)):
-                minus = now - datetime.fromtimestamp(int(latestHandshake[count + 1]))
-                if minus < time_delta:
-                    status = "running"
-                else:
-                    status = "stopped"
-                
-                if int(latestHandshake[count + 1]) > 0:
-                    lh_str = str(minus).split(".", maxsplit=1)[0]
-                else:
-                    lh_str = "No Handshake"
-                    
-                pubkey = latestHandshake[count]
-                p = peer_dict.get(pubkey)
-                if p is None or p.latest_handshake != lh_str or p.status != status:
-                    updates.append({
-                        "b_id": pubkey,
-                        "b_latest_handshake": lh_str,
-                        "b_status": status
-                    })
-                count += 2
-                
-            if len(updates) > 0:
-                with self.engine.begin() as conn:
-                    stmt = self.peersTable.update().where(
-                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                    ).values(
-                        latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
-                        status=sqlalchemy.bindparam('b_status')
-                    )
-                    conn.execute(stmt, updates)
-        except Exception as e:
-            current_app.logger.error(f"Error in getPeersLatestHandshake for {self.Name}: {e}")
-
-    def getPeersTransfer(self):
-        try:
-            if not self.getStatus():
-                self.toggleConfiguration()
-            # try:
-            command = [self.Protocol, "show", self.Name, "transfer"]
-            data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
-
-            data_usage = data_usage.decode("UTF-8").split("\n")
-            
-            data_usage = [p.split("\t") for p in data_usage]
-            
             existing_peers = {}
             with self.engine.connect() as conn:
                 for row in conn.execute(self.peersTable.select()).mappings().fetchall():
                     existing_peers[row['id']] = row
-                    
+
+            peer_dict = {p.id: p for p in self.Peers}
+
+            hs_updates = []
             cumu_updates = []
             total_updates = []
-            
-            for i in range(len(data_usage)):
-                if len(data_usage[i]) == 3:
-                    cur_i = existing_peers.get(data_usage[i][0])
-                    if cur_i is not None:
-                        total_sent = cur_i['total_sent']
-                        total_receive = cur_i['total_receive']
-                        cur_total_sent = float(data_usage[i][2]) / (1024 ** 3)
-                        cur_total_receive = float(data_usage[i][1]) / (1024 ** 3)
-                        cumulative_receive = cur_i['cumu_receive'] + total_receive
-                        cumulative_sent = cur_i['cumu_sent'] + total_sent
-                        if (total_sent * 0.999 ) <= cur_total_sent and (total_receive * 0.999) <= cur_total_receive: 
-                            total_sent = cur_total_sent
-                            total_receive = cur_total_receive
-                        else:
-                            cumu_updates.append({
-                                "b_id": data_usage[i][0],
-                                "b_cumu_receive": cumulative_receive,
-                                "b_cumu_sent": cumulative_sent,
-                                "b_cumu_data": cumulative_sent + cumulative_receive
-                            })
-                            total_sent = 0
-                            total_receive = 0
-                        
-                        status, p = self.searchPeer(data_usage[i][0])
-                        if status and (p.total_receive != total_receive or p.total_sent != total_sent):
-                            total_updates.append({
-                                "b_id": data_usage[i][0],
-                                "b_total_receive": total_receive,
-                                "b_total_sent": total_sent,
-                                "b_total_data": total_receive + total_sent
-                            })
+            ep_updates = []
 
-            with self.engine.begin() as conn:
-                if len(cumu_updates) > 0:
-                    stmt_cumu = self.peersTable.update().where(
-                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                    ).values(
-                        cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
-                        cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
-                        cumu_data=sqlalchemy.bindparam('b_cumu_data')
-                    )
-                    conn.execute(stmt_cumu, cumu_updates)
-                    
-                if len(total_updates) > 0:
-                    stmt_total = self.peersTable.update().where(
-                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                    ).values(
-                        total_receive=sqlalchemy.bindparam('b_total_receive'),
-                        total_sent=sqlalchemy.bindparam('b_total_sent'),
-                        total_data=sqlalchemy.bindparam('b_total_data')
-                    )
-                    conn.execute(stmt_total, total_updates)
-        except Exception as e:
-            current_app.logger.error(f"Error in getPeersTransfer for {self.Name}: {e}")
+            for line in lines[1:]:
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
 
-    def getPeersEndpoint(self):
-        try:
-            if not self.getStatus():
-                self.toggleConfiguration()
-            try:
-                command = [self.Protocol, "show", self.Name, "endpoints"]
-                data_usage = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
-            except subprocess.CalledProcessError:
-                return "stopped"
+                pubkey = parts[0]
+                endpoint = parts[2]
+                try:
+                    last_hs_ts = int(parts[4])
+                    rx_bytes = float(parts[5])
+                    tx_bytes = float(parts[6])
+                except ValueError:
+                    continue
 
-            data_usage = data_usage.decode("UTF-8").split()
-            count = 0
-            updates = []
-            peer_dict = {p.id: p for p in self.Peers}
-            for _ in range(int(len(data_usage) / 2)):
-                pubkey = data_usage[count]
-                endpoint = data_usage[count + 1]
+                if last_hs_ts > 0:
+                    minus = now - datetime.fromtimestamp(last_hs_ts)
+                    lh_str = str(minus).split(".", maxsplit=1)[0]
+                    status = "running" if minus < time_delta else "stopped"
+                else:
+                    lh_str = "No Handshake"
+                    status = "stopped"
+
                 p = peer_dict.get(pubkey)
+                if p is None or p.latest_handshake != lh_str or p.status != status:
+                    hs_updates.append({
+                        "b_id": pubkey,
+                        "b_latest_handshake": lh_str,
+                        "b_status": status
+                    })
+
                 if p is None or p.endpoint != endpoint:
-                    updates.append({
+                    ep_updates.append({
                         "b_id": pubkey,
                         "b_endpoint": endpoint
                     })
-                count += 2
-                
-            if len(updates) > 0:
+
+                cur_i = existing_peers.get(pubkey)
+                if cur_i is not None:
+                    total_sent = cur_i['total_sent']
+                    total_receive = cur_i['total_receive']
+                    cur_total_sent = tx_bytes / (1024 ** 3)
+                    cur_total_receive = rx_bytes / (1024 ** 3)
+                    cumulative_receive = cur_i['cumu_receive'] + total_receive
+                    cumulative_sent = cur_i['cumu_sent'] + total_sent
+
+                    if (total_sent * 0.999) <= cur_total_sent and (total_receive * 0.999) <= cur_total_receive:
+                        total_sent = cur_total_sent
+                        total_receive = cur_total_receive
+                    else:
+                        cumu_updates.append({
+                            "b_id": pubkey,
+                            "b_cumu_receive": cumulative_receive,
+                            "b_cumu_sent": cumulative_sent,
+                            "b_cumu_data": cumulative_sent + cumulative_receive
+                        })
+                        total_sent = 0
+                        total_receive = 0
+
+                    if p and (p.total_receive != total_receive or p.total_sent != total_sent):
+                        total_updates.append({
+                            "b_id": pubkey,
+                            "b_total_receive": total_receive,
+                            "b_total_sent": total_sent,
+                            "b_total_data": total_receive + total_sent
+                        })
+
+            if any([hs_updates, ep_updates, cumu_updates, total_updates]):
                 with self.engine.begin() as conn:
-                    stmt = self.peersTable.update().where(
-                        self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                    ).values(
-                        endpoint=sqlalchemy.bindparam('b_endpoint')
-                    )
-                    conn.execute(stmt, updates)
+                    if hs_updates:
+                        stmt = self.peersTable.update().where(
+                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                        ).values(
+                            latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
+                            status=sqlalchemy.bindparam('b_status')
+                        )
+                        conn.execute(stmt, hs_updates)
+
+                    if ep_updates:
+                        stmt = self.peersTable.update().where(
+                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                        ).values(
+                            endpoint=sqlalchemy.bindparam('b_endpoint')
+                        )
+                        conn.execute(stmt, ep_updates)
+
+                    if cumu_updates:
+                        stmt = self.peersTable.update().where(
+                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                        ).values(
+                            cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
+                            cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
+                            cumu_data=sqlalchemy.bindparam('b_cumu_data')
+                        )
+                        conn.execute(stmt, cumu_updates)
+
+                    if total_updates:
+                        stmt = self.peersTable.update().where(
+                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                        ).values(
+                            total_receive=sqlalchemy.bindparam('b_total_receive'),
+                            total_sent=sqlalchemy.bindparam('b_total_sent'),
+                            total_data=sqlalchemy.bindparam('b_total_data')
+                        )
+                        conn.execute(stmt, total_updates)
         except Exception as e:
-            current_app.logger.error(f"Error in getPeersEndpoint for {self.Name}: {e}")
+            current_app.logger.error(f"Error in refreshPeersRuntimeStats for {self.Name}: {e}")
+
+    def getPeersLatestHandshake(self):
+        self.refreshPeersRuntimeStats()
+
+    def getPeersTransfer(self):
+        self.refreshPeersRuntimeStats()
+
+    def getPeersEndpoint(self):
+        self.refreshPeersRuntimeStats()
 
     def toggleConfiguration(self) -> tuple[bool, str] | tuple[bool, None]:
         self.getStatus()

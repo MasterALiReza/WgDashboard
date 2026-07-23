@@ -97,9 +97,7 @@ def peerInformationBackgroundThread():
                         c = WireguardConfigurations.get(name)
                     if c is not None:
                         if c.getStatus():
-                            c.getPeersLatestHandshake()
-                            c.getPeersTransfer()
-                            c.getPeersEndpoint()
+                            c.refreshPeersRuntimeStats()
                             c.getPeers()
                             if DashboardConfig.GetConfig('WireGuardConfiguration', 'peer_tracking')[1] is True:
                                 app.logger.debug("[WGDashboard] Tracking Peers")

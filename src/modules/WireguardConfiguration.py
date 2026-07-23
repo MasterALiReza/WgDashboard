@@ -899,12 +899,17 @@ class WireguardConfiguration:
                         "b_latest_handshake": lh_str,
                         "b_status": status
                     })
+                if p is not None:
+                    p.latest_handshake = lh_str
+                    p.status = status
 
                 if p is None or p.endpoint != endpoint:
                     ep_updates.append({
                         "b_id": pubkey,
                         "b_endpoint": endpoint
                     })
+                if p is not None:
+                    p.endpoint = endpoint
 
                 cur_i = existing_peers.get(pubkey)
                 if cur_i is not None:
@@ -927,6 +932,10 @@ class WireguardConfiguration:
                         })
                         total_sent = 0
                         total_receive = 0
+                        if p is not None:
+                            p.cumu_receive = cumulative_receive
+                            p.cumu_sent = cumulative_sent
+                            p.cumu_data = cumulative_sent + cumulative_receive
 
                     if p and (p.total_receive != total_receive or p.total_sent != total_sent):
                         total_updates.append({
@@ -935,6 +944,10 @@ class WireguardConfiguration:
                             "b_total_sent": total_sent,
                             "b_total_data": total_receive + total_sent
                         })
+                    if p is not None:
+                        p.total_receive = total_receive
+                        p.total_sent = total_sent
+                        p.total_data = total_receive + total_sent
 
             if any([hs_updates, ep_updates, cumu_updates, total_updates]):
                 with self.engine.begin() as conn:

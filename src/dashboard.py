@@ -915,7 +915,7 @@ def API_updatePeerSettings(configName):
                 wireguardConfig.getPeers()
                 DashboardWebHooks.RunWebHook('peer_updated', {
                     "configuration": wireguardConfig.Name,
-                    "peers": [id]
+                    "peers": [peer.id]
                 })
                 return ResponseObject(status, msg)
             

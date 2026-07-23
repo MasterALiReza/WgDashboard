@@ -643,6 +643,8 @@ class WireguardConfiguration:
         return True, result['peers'], ""
 
     def searchPeer(self, publicKey):
+        if publicKey:
+            publicKey = publicKey.replace(' ', '+')
         if not publicKey or not CheckPeerKey(publicKey):
             return False, None
         peers = self.getPeersList()

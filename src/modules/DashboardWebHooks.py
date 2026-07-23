@@ -1,5 +1,4 @@
 import json
-import threading
 import time
 import urllib.parse
 import uuid
@@ -10,6 +9,8 @@ from pydantic import BaseModel, field_serializer
 import sqlalchemy as db
 from .DatabaseConnection import ConnectionString
 from flask import current_app
+
+from concurrent.futures import ThreadPoolExecutor
 
 WebHookActions = ['peer_created', 'peer_deleted', 'peer_updated']
 class WebHook(BaseModel):
@@ -40,7 +41,13 @@ class WebHookSessionLogs(BaseModel):
 
 class DashboardWebHooks:
     def __init__(self, DashboardConfig):
-        self.engine = db.create_engine(ConnectionString("wgdashboard"))
+        # SQLite does not support connection pooling; use NullPool for SQLite.
+        _db_type = DashboardConfig.GetConfig("Database", "type")[1]
+        if _db_type == 'sqlite':
+            self.engine = db.create_engine(ConnectionString("wgdashboard"))
+        else:
+            self.engine = db.create_engine(ConnectionString("wgdashboard"), pool_size=5, max_overflow=10)
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="wgd_webhook_worker")
         self.metadata = db.MetaData()
         self.webHooksTable = db.Table(
             'DashboardWebHooks', self.metadata,
@@ -190,18 +197,18 @@ class DashboardWebHooks:
             data['action'] = action
             for i in subscribedWebHooks:
                 try:
-                    ws = WebHookSession(i, data)
-                    t = threading.Thread(target=ws.Execute, daemon=True)
-                    t.start()
-                    current_app.logger.info(f"Requesting {i.PayloadURL}")
+                    # Pass a copy of dict to prevent mutable state contamination between webhook tasks
+                    ws = WebHookSession(i, dict(data), engine=self.engine)
+                    self.executor.submit(ws.Execute)
+                    current_app.logger.info(f"Queued Webhook request for {i.PayloadURL}")
                 except Exception as e:
                     current_app.logger.error(f"Requesting {i.PayloadURL} error: {e}")
         except Exception as e:
-            current_app.logger.error("Error when running WebHook")
+            current_app.logger.error(f"Error when running WebHook: {e}")
 
 class WebHookSession:
-    def __init__(self, webHook: WebHook, data: dict[str, str]):
-        self.engine = db.create_engine(ConnectionString("wgdashboard"))
+    def __init__(self, webHook: WebHook, data: dict[str, str], engine=None):
+        self.engine = engine if engine is not None else db.create_engine(ConnectionString("wgdashboard"))
         self.metadata = db.MetaData()
         self.webHookSessionsTable = db.Table('DashboardWebHookSessions', self.metadata, autoload_with=self.engine)
         self.webHook = webHook
@@ -280,7 +287,10 @@ class WebHookSession:
                 break
             except requests.exceptions.RequestException as e:
                 self.UpdateSessionLog(1, f"Attempt #{i + 1}/5. Request errored. Reason: " + str(e))
-            time.sleep(10)
+            
+            # Exponential Backoff for retries: 2, 4, 8, 16 seconds
+            if i < 4:
+                time.sleep(2 ** (i + 1))
         
         if not success:
             self.UpdateSessionLog(1, "Webhook request failed & terminated.")

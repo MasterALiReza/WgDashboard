@@ -280,6 +280,13 @@ class Peer:
         try:
             with self.configuration.engine.begin() as conn:
                 if mode == "total":
+                    peer_total_receive = (self.cumu_receive or 0) + (self.total_receive or 0)
+                    peer_total_sent    = (self.cumu_sent or 0) + (self.total_sent or 0)
+                    peer_total_data    = (self.cumu_data or 0) + (self.total_data or 0)
+                    if peer_total_data > 0 or peer_total_receive > 0 or peer_total_sent > 0:
+                        self.configuration._add_to_traffic_snapshot(
+                            conn, peer_total_receive, peer_total_sent, peer_total_data
+                        )
                     conn.execute(
                         self.configuration.peersTable.update().values({
                             "total_data": 0,
@@ -292,6 +299,18 @@ class Peer:
                             self.configuration.peersTable.c.id == self.id
                         )
                     )
+                    conn.execute(
+                        self.configuration.peersRestrictedTable.update().values({
+                            "total_data": 0,
+                            "cumu_data": 0,
+                            "total_receive": 0,
+                            "cumu_receive": 0,
+                            "total_sent": 0,
+                            "cumu_sent": 0
+                        }).where(
+                            self.configuration.peersRestrictedTable.c.id == self.id
+                        )
+                    )
                     self.total_data = 0
                     self.total_receive = 0
                     self.total_sent = 0
@@ -299,31 +318,69 @@ class Peer:
                     self.cumu_sent = 0
                     self.cumu_receive = 0
                 elif mode == "receive":
+                    peer_total_receive = (self.cumu_receive or 0) + (self.total_receive or 0)
+                    if peer_total_receive > 0:
+                        self.configuration._add_to_traffic_snapshot(
+                            conn, peer_total_receive, 0, peer_total_receive
+                        )
                     conn.execute(
                         self.configuration.peersTable.update().values({
                             "total_receive": 0,
                             "cumu_receive": 0,
+                            "total_data": self.total_sent or 0,
+                            "cumu_data": self.cumu_sent or 0
                         }).where(
                             self.configuration.peersTable.c.id == self.id
+                        )
+                    )
+                    conn.execute(
+                        self.configuration.peersRestrictedTable.update().values({
+                            "total_receive": 0,
+                            "cumu_receive": 0,
+                            "total_data": self.total_sent or 0,
+                            "cumu_data": self.cumu_sent or 0
+                        }).where(
+                            self.configuration.peersRestrictedTable.c.id == self.id
                         )
                     )
                     self.cumu_receive = 0
                     self.total_receive = 0
+                    self.total_data = self.total_sent or 0
+                    self.cumu_data = self.cumu_sent or 0
                 elif mode == "sent":
+                    peer_total_sent = (self.cumu_sent or 0) + (self.total_sent or 0)
+                    if peer_total_sent > 0:
+                        self.configuration._add_to_traffic_snapshot(
+                            conn, 0, peer_total_sent, peer_total_sent
+                        )
                     conn.execute(
                         self.configuration.peersTable.update().values({
                             "total_sent": 0,
-                            "cumu_sent": 0
+                            "cumu_sent": 0,
+                            "total_data": self.total_receive or 0,
+                            "cumu_data": self.cumu_receive or 0
                         }).where(
                             self.configuration.peersTable.c.id == self.id
                         )
                     )
+                    conn.execute(
+                        self.configuration.peersRestrictedTable.update().values({
+                            "total_sent": 0,
+                            "cumu_sent": 0,
+                            "total_data": self.total_receive or 0,
+                            "cumu_data": self.cumu_receive or 0
+                        }).where(
+                            self.configuration.peersRestrictedTable.c.id == self.id
+                        )
+                    )
                     self.cumu_sent = 0
                     self.total_sent = 0
+                    self.total_data = self.total_receive or 0
+                    self.cumu_data = self.cumu_receive or 0
                 else:
                     return False
         except Exception as e:
-            print(e)
+            current_app.logger.error(f"Error in resetDataUsage: {e}")
             return False
         return True
     

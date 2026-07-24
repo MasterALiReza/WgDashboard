@@ -26,21 +26,27 @@ export default {
 			if (res.status){
 				let data = ""
 				if (this.selectedPeer.configuration.Protocol === "awg"){
-					let awgQRCodeObject = {
-						containers: [
-							{
-								awg: {
-									isThirdPartyConfig: true,
-									last_config: res.data.file,
-									port: this.selectedPeer.configuration.ListenPort,
-									transport_proto: "udp"
-								},
-								container: "amnezia-awg",
-							}
-						],
-						defaultContainer: "amnezia-awg",
-						description: this.selectedPeer.name,
-						hostName: this.dashboardStore.Configuration.Peers.remote_endpoint
+					let awgQRCodeObject = null;
+					if (res.data.amneziaVPN) {
+						try { awgQRCodeObject = JSON.parse(res.data.amneziaVPN); } catch {}
+					}
+					if (!awgQRCodeObject) {
+						awgQRCodeObject = {
+							containers: [
+								{
+									awg: {
+										isThirdPartyConfig: true,
+										last_config: res.data.file,
+										port: this.selectedPeer.configuration.ListenPort,
+										transport_proto: "udp"
+									},
+									container: "amnezia-awg",
+								}
+							],
+							defaultContainer: "amnezia-awg",
+							description: this.selectedPeer.name,
+							hostName: this.dashboardStore.Configuration.Peers.remote_endpoint
+						};
 					}
 					QRCode.toCanvas(
 						document.querySelector("#awg_vpn_qrcode"), btoa(unescape(encodeURIComponent(JSON.stringify(awgQRCodeObject)))), (error) => {

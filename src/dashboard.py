@@ -1240,7 +1240,7 @@ def API_getConfigurationInfo():
     if not configurationName or configurationName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Please provide configuration name")
     return ResponseObject(data={
-        "configurationInfo": WireguardConfigurations[configurationName],
+        "configurationInfo": WireguardConfigurations[configurationName].toJson(),
         "configurationPeers": WireguardConfigurations[configurationName].getPeersList(),
         "configurationRestrictedPeers": WireguardConfigurations[configurationName].getRestrictedPeersList()
     })

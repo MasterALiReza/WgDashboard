@@ -303,14 +303,15 @@ export default {
 		},
 		_getStepLabel(step) {
 			const labels = {
-				queued:              'Waiting to start...',
+				uploading:           'Uploading backup archive...',
+				queued:              'Waiting to start restore...',
 				validating:          'Validating backup archive...',
 				extracting:          'Extracting backup files...',
 				restoring_configs:   'Restoring configuration files...',
 				restoring_wireguard: 'Restoring WireGuard interfaces...',
-				restoring_databases: 'Restoring databases...',
-				finalizing:          'Finalizing restore...',
-				done:                'Restore complete!',
+				restoring_databases: 'Restoring databases & records...',
+				finalizing:          'Finalizing restore operation...',
+				done:                'Restore complete! Restarting dashboard...',
 			};
 			return labels[step] || (step ? step : 'Processing...');
 		},
@@ -389,22 +390,46 @@ export default {
 		async restoreBackup({filename = null, formData = null} = {}) {
 			this.restoring = true;
 			this.restoreProgress = 0;
-			this.restoreStepLabel = this._getStepLabel('queued');
 
 			try {
 				let res;
 				if (formData) {
-					// Uploaded file — multipart POST
-					const headers = getHeaders();
-					delete headers['Content-Type'];
-					const response = await fetch(getUrl("/api/globalBackup/restore"), {
-						method: 'POST',
-						headers,
-						body: formData
+					// Uploaded file — XHR for real-time upload progress
+					this.restoreStepLabel = 'Uploading backup file... (0%)';
+					res = await new Promise((resolve, reject) => {
+						const xhr = new XMLHttpRequest();
+						xhr.open("POST", getUrl("/api/globalBackup/restore"));
+
+						const headers = getHeaders();
+						delete headers['Content-Type']; // Let browser set multipart boundary
+
+						for (const [k, v] of Object.entries(headers)) {
+							xhr.setRequestHeader(k, v);
+						}
+
+						xhr.upload.onprogress = (e) => {
+							if (e.lengthComputable) {
+								const pct = Math.round((e.loaded * 100) / e.total);
+								this.restoreProgress = pct;
+								this.restoreStepLabel = `Uploading backup file... (${pct}%)`;
+							}
+						};
+
+						xhr.onload = () => {
+							try {
+								const json = JSON.parse(xhr.responseText);
+								resolve(json);
+							} catch (err) {
+								reject(new Error("Invalid server response during upload"));
+							}
+						};
+
+						xhr.onerror = () => reject(new Error("Network error during file upload"));
+						xhr.send(formData);
 					});
-					res = await response.json();
 				} else {
 					// Existing backup — JSON POST
+					this.restoreStepLabel = this._getStepLabel('queued');
 					res = await new Promise((resolve) => {
 						fetchPost("/api/globalBackup/restore", {filename}, (r) => resolve(r));
 					});
@@ -423,12 +448,14 @@ export default {
 					return;
 				}
 
+				// Switch to tracking backend restore progress via SSE
+				this.restoreProgress = 0;
 				this._beginProgressTracking(jobId);
 
 			} catch (error) {
 				console.error(error);
 				this.restoring = false;
-				this.store.newMessage("WGDashboard", "Error starting restore", "danger");
+				this.store.newMessage("WGDashboard", error.message || "Error starting restore", "danger");
 			}
 		},
 

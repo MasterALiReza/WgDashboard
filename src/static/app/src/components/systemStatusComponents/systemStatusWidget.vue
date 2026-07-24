@@ -40,20 +40,20 @@ const data = computed(() => {
 					<LocaleText t="CPU"></LocaleText>
 				</h6>
 				<h6 class="ms-auto">
-					<span v-if="data">
+					<span v-if="data?.CPU">
 						{{ data.CPU.cpu_percent }}%
 					</span>
 					<span v-else class="spinner-border spinner-border-sm"></span>
 				</h6>
 			</div>
 			<div class="progress" role="progressbar" style="height: 6px">
-				<div class="progress-bar" :style="{width: `${data?.CPU.cpu_percent}%` }"></div>
+				<div class="progress-bar" :style="{width: `${data?.CPU?.cpu_percent || 0}%` }"></div>
 			</div>
 			<div class="d-grid mt-2 gap-1" style="grid-template-columns: repeat(10, 1fr)">
 				<CpuCore
-					v-for="(cpu, count) in data?.CPU.cpu_percent_per_cpu"
+					v-for="(cpu, count) in data?.CPU?.cpu_percent_per_cpu"
 				         :key="count"
-				         :align="(count + 1) > Math.round(data?.CPU.cpu_percent_per_cpu.length / 2)"
+				         :align="(count + 1) > Math.round((data?.CPU?.cpu_percent_per_cpu?.length || 1) / 2)"
 				         :core_number="count" :percentage="cpu"
 				></CpuCore>
 			</div>
@@ -65,14 +65,14 @@ const data = computed(() => {
 					<LocaleText t="Storage"></LocaleText>
 				</h6>
 				<h6 class="ms-auto">
-					<span v-if="data">
-						{{ data.Disks.find(x => x.mountPoint === '/') ? data?.Disks.find(x => x.mountPoint === '/').percent : data?.Disks[0].percent }}%
+					<span v-if="data?.Disks && data.Disks.length > 0">
+						{{ data.Disks.find(x => x.mountPoint === '/') ? data.Disks.find(x => x.mountPoint === '/').percent : data.Disks[0].percent }}%
 					</span>
 					<span v-else class="spinner-border spinner-border-sm"></span>
 				</h6>
 			</div>
 			<div class="progress" role="progressbar" style="height: 6px">
-				<div class="progress-bar bg-success" :style="{width: `${data?.Disks.find(x => x.mountPoint === '/') ? data?.Disks.find(x => x.mountPoint === '/').percent : data?.Disks[0].percent}%` }"></div>
+				<div class="progress-bar bg-success" :style="{width: `${(data?.Disks && data.Disks.length > 0) ? (data.Disks.find(x => x.mountPoint === '/') ? data.Disks.find(x => x.mountPoint === '/').percent : data.Disks[0].percent) : 0}%` }"></div>
 			</div>
 			<div class="d-grid mt-2 gap-1" style="grid-template-columns: repeat(10, 1fr)">
 				<StorageMount v-for="(disk, count) in data?.Disks"
@@ -90,14 +90,14 @@ const data = computed(() => {
 					<LocaleText t="Memory"></LocaleText>
 				</h6>
 				<h6 class="ms-auto">
-							<span v-if="data">
-								{{ data?.Memory.VirtualMemory.percent }}%
+							<span v-if="data?.Memory?.VirtualMemory">
+								{{ data.Memory.VirtualMemory.percent }}%
 							</span>
 					<span v-else class="spinner-border spinner-border-sm"></span>
 				</h6>
 			</div>
 			<div class="progress" role="progressbar" style="height: 6px">
-				<div class="progress-bar bg-info" :style="{width: `${data?.Memory.VirtualMemory.percent}%` }"></div>
+				<div class="progress-bar bg-info" :style="{width: `${data?.Memory?.VirtualMemory?.percent || 0}%` }"></div>
 			</div>
 		</div>
 		<div class="col-md-6 col-sm-12 col-xl-3">
@@ -107,14 +107,14 @@ const data = computed(() => {
 					<LocaleText t="Swap Memory"></LocaleText>
 				</h6>
 				<h6 class="ms-auto">
-							<span v-if="data">
-								{{ data?.Memory.SwapMemory.percent }}%
+							<span v-if="data?.Memory?.SwapMemory">
+								{{ data.Memory.SwapMemory.percent }}%
 							</span>
 					<span v-else class="spinner-border spinner-border-sm"></span>
 				</h6>
 			</div>
 			<div class="progress" role="progressbar" style="height: 6px">
-				<div class="progress-bar bg-warning" :style="{width: `$ data?.Memory.SwapMemory.percent}%` }"></div>
+				<div class="progress-bar bg-warning" :style="{width: `${data?.Memory?.SwapMemory?.percent || 0}%` }"></div>
 			</div>
 		</div>
 	</div>

@@ -154,7 +154,11 @@ def globalBackupBackgroundThread():
                         time_diff = now - last_backup_time
                         should_backup = False
                         
-                        if schedule == "12h" and time_diff.total_seconds() >= 12 * 3600:
+                        if schedule == "3h" and time_diff.total_seconds() >= 3 * 3600:
+                            should_backup = True
+                        elif schedule == "6h" and time_diff.total_seconds() >= 6 * 3600:
+                            should_backup = True
+                        elif schedule == "12h" and time_diff.total_seconds() >= 12 * 3600:
                             should_backup = True
                         elif schedule == "daily" and time_diff.total_seconds() >= 24 * 3600:
                             should_backup = True

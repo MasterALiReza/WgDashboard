@@ -96,6 +96,8 @@
 						</div>
 						<div class="col-sm-8">
 							<select class="form-select form-select-sm border-0 bg-body rounded-3" v-model="auto_backup_schedule" @change="saveSettings" :disabled="!auto_backup || saving_settings">
+								<option value="3h">3 Hours</option>
+								<option value="6h">6 Hours</option>
 								<option value="12h">12 Hours</option>
 								<option value="daily">Daily</option>
 								<option value="weekly">Weekly</option>

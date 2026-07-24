@@ -1,6 +1,6 @@
 import logging
 import random, shutil, sqlite3, configparser, hashlib, ipaddress, json, os, secrets, subprocess
-import time, re, uuid, bcrypt, psutil, pyotp, threading
+import time, re, uuid, bcrypt, psutil, pyotp, threading, signal
 import traceback
 from uuid import uuid4
 from zipfile import ZipFile
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import sqlalchemy
 from jinja2.sandbox import SandboxedEnvironment
 _jinja_env = SandboxedEnvironment()
-from flask import Flask, request, render_template, session, send_file, current_app
+from flask import Flask, request, render_template, session, send_file, current_app, Response
 from flask_cors import CORS
 from icmplib import ping, traceroute
 from flask.json.provider import DefaultJSONProvider
@@ -33,7 +33,7 @@ from modules.PeerJobs import PeerJobs
 from modules.DashboardConfig import DashboardConfig
 from modules.WireguardConfiguration import WireguardConfiguration
 from modules.AmneziaConfiguration import AmneziaConfiguration
-from modules.GlobalBackup import GlobalBackupManager
+from modules.GlobalBackup import GlobalBackupManager, _restore_jobs, _restore_jobs_lock, _cleanup_expired_jobs
 
 from client import createClientBlueprint
 
@@ -284,7 +284,8 @@ def auth_req():
     if request.method.lower() == 'options':
         return ResponseObject(True)        
 
-    if app.config.get('MAINTENANCE_MODE', False) and not request.path.endswith('/api/globalBackup/restore'):
+    _maintenance_whitelist = ('/api/globalBackup/restore', '/api/globalBackup/restore/progress')
+    if app.config.get('MAINTENANCE_MODE', False) and not any(request.path.endswith(p) for p in _maintenance_whitelist):
         return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
 
     DashboardConfig.APIAccessed = False    
@@ -772,10 +773,17 @@ def API_downloadGlobalBackup():
 
 @app.post(f'{APP_PREFIX}/api/globalBackup/restore')
 def API_restoreGlobalBackup():
+    """Start restore in a background thread and immediately return a job_id."""
+    if app.config.get('MAINTENANCE_MODE', False):
+        return ResponseObject(False, "System is already undergoing maintenance or restoring.", status_code=409)
+    
     app.config['MAINTENANCE_MODE'] = True
+    _cleanup_expired_jobs()
+
     try:
         target_path = None
-        
+        is_uploaded = False
+
         if 'backupFile' in request.files:
             file = request.files['backupFile']
             if file and file.filename.endswith('.zip'):
@@ -785,11 +793,12 @@ def API_restoreGlobalBackup():
                 if header != b'PK\x03\x04':
                     app.config['MAINTENANCE_MODE'] = False
                     return ResponseObject(False, "Invalid backup file format", status_code=400)
-                
+
                 clean_name = os.path.basename(file.filename)
                 target_path = os.path.join(GlobalBackupManager.get_backup_dir(), f"uploaded_{uuid.uuid4().hex}_{clean_name}")
                 file.save(target_path)
-        
+                is_uploaded = True
+
         if not target_path:
             data = request.get_json(silent=True) or {}
             filename = data.get('filename')
@@ -801,17 +810,108 @@ def API_restoreGlobalBackup():
             app.config['MAINTENANCE_MODE'] = False
             return ResponseObject(False, "Valid backup file or filename must be provided", status_code=400)
 
-        status, message = GlobalBackupManager.restore_global_backup(target_path)
-        app.config['MAINTENANCE_MODE'] = False
-        
-        if not status:
-            return ResponseObject(False, message, status_code=500)
-        
-        return ResponseObject(True, message, data={"restart_required": True})
-        
+        # Register a new job
+        job_id = str(uuid.uuid4())
+        with _restore_jobs_lock:
+            _restore_jobs[job_id] = {
+                "pct": 0,
+                "step": "queued",
+                "done": False,
+                "error": None,
+                "created_at": datetime.utcnow().isoformat()
+            }
+
+        def _run_restore(tp: str, jid: str, uploaded: bool):
+            app.config['MAINTENANCE_MODE'] = True
+            try:
+                status, message = GlobalBackupManager.restore_global_backup(tp, job_id=jid)
+            except Exception as exc:
+                status, message = False, str(exc)
+            finally:
+                if uploaded and os.path.exists(tp):
+                    try:
+                        os.remove(tp)
+                    except Exception:
+                        pass
+
+            with _restore_jobs_lock:
+                if jid in _restore_jobs:
+                    if not status:
+                        _restore_jobs[jid].update({
+                            "done": True, "error": message,
+                            "finished_at": datetime.utcnow()
+                        })
+                    else:
+                        _restore_jobs[jid].update({
+                            "done": True, "error": None,
+                            "finished_at": datetime.utcnow()
+                        })
+
+            app.config['MAINTENANCE_MODE'] = False
+
+            if status:
+                # Delay restart so SSE client gets the final 100% update
+                time.sleep(3)
+                _cleanup_expired_jobs()
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(
+            target=_run_restore,
+            args=(target_path, job_id, is_uploaded),
+            daemon=True,
+            name=f"restore-{job_id[:8]}"
+        ).start()
+
+        return ResponseObject(True, "Restore started", data={"job_id": job_id})
+
     except Exception as e:
         app.config['MAINTENANCE_MODE'] = False
-        return ResponseObject(False, f"Restore execution error: {str(e)}", status_code=500)
+        return ResponseObject(False, f"Restore start error: {str(e)}", status_code=500)
+
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/restore/progress')
+def API_restoreGlobalBackupProgress():
+    """SSE endpoint — streams restore job progress to the frontend."""
+    job_id = request.args.get('job_id', '')
+    if not job_id:
+        return ResponseObject(False, "job_id is required", status_code=400)
+
+    def _event_stream():
+        sent_done = False
+        for _ in range(600):  # max 5 min (600 * 0.5s)
+            with _restore_jobs_lock:
+                job = dict(_restore_jobs.get(job_id, {}))
+
+            if not job:
+                yield f"data: {json.dumps({'error': 'Job not found', 'done': True})}\n\n"
+                break
+
+            payload = {
+                "pct": job.get("pct", 0),
+                "step": job.get("step", ""),
+                "done": job.get("done", False),
+                "error": job.get("error")
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+
+            if job.get("done") or job.get("error"):
+                sent_done = True
+                break
+
+            time.sleep(0.5)
+
+        if not sent_done:
+            yield f"data: {json.dumps({'error': 'Restore timed out', 'done': True})}\n\n"
+
+    return Response(
+        _event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
 
 @app.get(f'{APP_PREFIX}/api/getDashboardConfiguration')
 def API_getDashboardConfiguration():

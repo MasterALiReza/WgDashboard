@@ -5,12 +5,41 @@ import zipfile
 import hashlib
 import shutil
 import uuid
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 import sqlalchemy as db
 from sqlalchemy.schema import CreateTable
 from .DatabaseConnection import ConnectionString
 
 GLOBAL_BACKUP_DIR = os.getenv('GLOBAL_BACKUP_PATH', os.path.join(os.getenv('CONFIGURATION_PATH', '.'), 'GlobalBackups'))
+
+# ─── Restore Job Tracking ────────────────────────────────────────────────────
+# Thread-safe dict: { job_id: {pct, step, done, error, created_at} }
+_restore_jobs: dict = {}
+_restore_jobs_lock = threading.Lock()
+
+JOB_TTL_SECONDS = 300  # پاکسازی job ها بعد از ۵ دقیقه از اتمام
+
+
+def _report_progress(job_id: str | None, pct: int, step: str) -> None:
+    """Thread-safe progress reporter for restore jobs."""
+    if not job_id:
+        return
+    with _restore_jobs_lock:
+        if job_id in _restore_jobs:
+            _restore_jobs[job_id].update({"pct": pct, "step": step})
+
+
+def _cleanup_expired_jobs() -> None:
+    """Remove restore jobs that finished more than JOB_TTL_SECONDS ago."""
+    cutoff = datetime.utcnow() - timedelta(seconds=JOB_TTL_SECONDS)
+    with _restore_jobs_lock:
+        expired = [
+            jid for jid, info in _restore_jobs.items()
+            if info.get("done") and info.get("finished_at", datetime.utcnow()) < cutoff
+        ]
+        for jid in expired:
+            del _restore_jobs[jid]
 
 def calculate_sha256(file_path: str) -> str:
     sha256_hash = hashlib.sha256()
@@ -26,18 +55,15 @@ def dump_database_to_sql(db_name: str, dump_path: str = None) -> str:
         if cn.startswith('sqlite:///'):
             import sqlite3
             db_path = cn.split('sqlite:///')[1].split('?')[0]
-            con = sqlite3.connect(db_path)
-            
-            if dump_path:
-                with open(dump_path, 'w', encoding='utf-8') as f:
-                    for line in con.iterdump():
-                        f.write(line + "\n")
-                con.close()
-                return ""
-            else:
-                statements = [line for line in con.iterdump()]
-                con.close()
-                return "\n".join(statements)
+            with sqlite3.connect(db_path, timeout=30.0) as con:
+                if dump_path:
+                    with open(dump_path, 'w', encoding='utf-8') as f:
+                        for line in con.iterdump():
+                            f.write(line + "\n")
+                    return ""
+                else:
+                    statements = [line for line in con.iterdump()]
+                    return "\n".join(statements)
 
         # Fallback to SQLAlchemy for PostgreSQL/MySQL
         engine = db.create_engine(cn)
@@ -85,7 +111,16 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
     if not sql_content or not sql_content.strip():
         return True
     try:
-        engine = db.create_engine(ConnectionString(db_name))
+        cn_str = ConnectionString(db_name)
+        # Native execution for SQLite to handle semicolons inside string data and transactions correctly
+        if cn_str.startswith('sqlite:///'):
+            import sqlite3
+            db_path = cn_str.split('sqlite:///')[1].split('?')[0]
+            with sqlite3.connect(db_path, timeout=30.0) as con:
+                con.executescript(sql_content)
+            return True
+
+        engine = db.create_engine(cn_str)
         metadata = db.MetaData()
         try:
             metadata.reflect(bind=engine)
@@ -101,7 +136,7 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
                 if stmt and not stmt.startswith("--"):
                     try:
                         conn.execute(db.text(stmt))
-                    except Exception as e:
+                    except Exception:
                         pass
         engine.dispose()
         return True
@@ -348,19 +383,31 @@ class GlobalBackupManager:
             return False, f"Failed to validate archive: {str(e)}"
 
     @staticmethod
-    def restore_global_backup(zip_filepath: str) -> tuple[bool, str]:
+    def restore_global_backup(zip_filepath: str, job_id: str | None = None) -> tuple[bool, str]:
+        def report(pct: int, step: str) -> None:
+            _report_progress(job_id, pct, step)
+
+        report(5, "validating")
         valid, manifest_or_err = GlobalBackupManager.validate_backup_manifest(zip_filepath)
         if not valid:
             return False, str(manifest_or_err)
 
         temp_extract = os.path.join(GlobalBackupManager.get_backup_dir(), f"restore_{uuid.uuid4().hex}")
         try:
+            report(10, "extracting")
             with zipfile.ZipFile(zip_filepath, 'r') as zipf:
+                # Zip Slip Protection: sanitize extracted member paths
+                abs_temp = os.path.abspath(temp_extract)
+                for member in zipf.namelist():
+                    target_member_path = os.path.abspath(os.path.join(abs_temp, member))
+                    if not target_member_path.startswith(abs_temp + os.sep) and target_member_path != abs_temp:
+                        return False, f"Zip member attempted path traversal: {member}"
                 zipf.extractall(temp_extract)
 
             config_path = os.getenv('CONFIGURATION_PATH', '.')
 
             # 1. Restore ini & config files
+            report(20, "restoring_configs")
             ini_src = os.path.join(temp_extract, 'wg-dashboard.ini')
             if os.path.exists(ini_src):
                 shutil.copy(ini_src, os.path.join(config_path, 'wg-dashboard.ini'))
@@ -379,6 +426,7 @@ class GlobalBackupManager:
                 shutil.copytree(plugins_src, os.path.join(config_path, 'plugins'), dirs_exist_ok=True)
 
             # 2. Restore WireGuard & AmneziaWG .conf files
+            report(40, "restoring_wireguard")
             configs_src = os.path.join(temp_extract, 'configs')
             if os.path.exists(configs_src) and os.path.isdir(configs_src):
                 target_wg = "/etc/wireguard"
@@ -420,17 +468,24 @@ class GlobalBackupManager:
                             shutil.copy(os.path.join(amnezia_src, fname), os.path.join(target_amnezia, fname))
 
             # 3. Restore databases from SQL dumps
+            report(60, "restoring_databases")
             sql_src = os.path.join(temp_extract, 'sql')
             if os.path.exists(sql_src) and os.path.isdir(sql_src):
-                for dump_file in os.listdir(sql_src):
-                    if dump_file.endswith('_dump.sql'):
-                        db_name = dump_file.replace('_dump.sql', '')
-                        with open(os.path.join(sql_src, dump_file), 'r', encoding='utf-8', errors='ignore') as f:
-                            sql_content = f.read()
-                        restore_database_from_sql(db_name, sql_content)
+                dump_files = [f for f in os.listdir(sql_src) if f.endswith('_dump.sql')]
+                total_dumps = len(dump_files) or 1
+                for idx, dump_file in enumerate(dump_files):
+                    db_name = dump_file.replace('_dump.sql', '')
+                    with open(os.path.join(sql_src, dump_file), 'r', encoding='utf-8', errors='ignore') as f:
+                        sql_content = f.read()
+                    restore_database_from_sql(db_name, sql_content)
+                    # Report granular progress between 60% and 90%
+                    pct = 60 + int(30 * (idx + 1) / total_dumps)
+                    report(pct, "restoring_databases")
 
+            report(95, "finalizing")
             shutil.rmtree(temp_extract, ignore_errors=True)
-            return True, "Global backup restored successfully. Please restart WGDashboard to apply changes."
+            report(100, "done")
+            return True, "Global backup restored successfully."
 
         except Exception as e:
             if os.path.exists(temp_extract):

@@ -13,9 +13,52 @@
 				<LocaleText t="Critical system snapshot and restoration utility. Proceed with caution." />
 			</p>
 
+			<!-- ─── Restore Progress Bar (inside card) ─── -->
+			<transition name="restore-fade">
+				<div v-if="restoring" class="mb-4 p-3 rounded-4 border" style="background: var(--bs-tertiary-bg);">
+					<div class="d-flex align-items-center justify-content-between mb-2">
+						<div class="d-flex align-items-center gap-2">
+							<span class="spinner-border spinner-border-sm text-warning" v-if="restoreProgress < 100"></span>
+							<i class="bi bi-check-circle-fill text-success" v-else></i>
+							<span class="fw-semibold small">
+								<LocaleText t="Restoring Backup..." />
+							</span>
+						</div>
+						<span class="badge text-bg-warning fw-bold">{{ restoreProgress }}%</span>
+					</div>
+
+					<!-- Progress Bar -->
+					<div class="progress rounded-3 mb-2" style="height: 18px;">
+						<div
+							class="progress-bar progress-bar-striped progress-bar-animated bg-warning"
+							role="progressbar"
+							:style="{ width: restoreProgress + '%' }"
+							:aria-valuenow="restoreProgress"
+							aria-valuemin="0"
+							aria-valuemax="100"
+						></div>
+					</div>
+
+					<!-- Step label -->
+					<small class="text-muted d-block">
+						<i class="bi bi-arrow-right-circle me-1"></i>{{ restoreStepLabel }}
+					</small>
+
+					<!-- Warning: do not close -->
+					<small class="text-danger d-block mt-2" v-if="restoreProgress < 100">
+						<i class="bi bi-exclamation-triangle-fill me-1"></i>
+						<LocaleText t="Do not close this page. The dashboard will restart automatically when done." />
+					</small>
+					<small class="text-success d-block mt-2" v-else>
+						<i class="bi bi-arrow-repeat me-1"></i>
+						<LocaleText t="Restore complete! Restarting dashboard..." />
+					</small>
+				</div>
+			</transition>
+
 			<div class="d-flex flex-column flex-sm-row gap-2 mb-4">
 				<div class="flex-grow-1">
-					<button class="btn rounded-3 w-100" :class="creating ? 'btn-secondary' : 'btn-primary'" @click="createBackup()" :disabled="creating">
+					<button class="btn rounded-3 w-100" :class="creating ? 'btn-secondary' : 'btn-primary'" @click="createBackup()" :disabled="creating || restoring">
 						<span v-if="creating" class="spinner-border spinner-border-sm"></span>
 						<span v-else><i class="bi bi-plus-circle me-1"></i> <LocaleText t="Create Global Backup" /></span>
 					</button>
@@ -23,13 +66,13 @@
 				
 				<div class="d-flex gap-2">
 					<input type="file" ref="fileInput" @change="uploadBackup" accept=".zip" style="display: none;" />
-					<button class="btn btn-outline-primary rounded-3 text-nowrap px-3" @click="$refs.fileInput.click()" :disabled="loading" :title="GetLocale('Upload Archive')">
+					<button class="btn btn-outline-primary rounded-3 text-nowrap px-3" @click="$refs.fileInput.click()" :disabled="loading || restoring" :title="GetLocale('Upload Archive')">
 						<i class="bi bi-upload me-1"></i> <LocaleText t="Upload Archive" />
 					</button>
-					<button class="btn btn-outline-secondary rounded-3 px-3" @click="getBackups()" :disabled="loading" :title="GetLocale('Refresh')">
+					<button class="btn btn-outline-secondary rounded-3 px-3" @click="getBackups()" :disabled="loading || restoring" :title="GetLocale('Refresh')">
 						<i class="bi bi-arrow-clockwise"></i>
 					</button>
-					<button class="btn btn-outline-secondary rounded-3 px-3" @click="toggleSort()" :disabled="loading" :title="sort_descending ? GetLocale('Sort: Oldest First') : GetLocale('Sort: Newest First')">
+					<button class="btn btn-outline-secondary rounded-3 px-3" @click="toggleSort()" :disabled="loading || restoring" :title="sort_descending ? GetLocale('Sort: Oldest First') : GetLocale('Sort: Newest First')">
 						<i class="bi" :class="sort_descending ? 'bi-sort-numeric-down-alt' : 'bi-sort-numeric-up'"></i>
 					</button>
 				</div>
@@ -94,13 +137,13 @@
 							<td><small class="text-muted"><i class="bi bi-hdd me-1"></i> {{ formatSize(backup.size) }}</small></td>
 							<td class="text-end">
 								<div class="btn-group">
-									<button class="btn btn-sm btn-outline-primary" @click="downloadBackup(backup.filename)" :title="GetLocale('Download')">
+									<button class="btn btn-sm btn-outline-primary" @click="downloadBackup(backup.filename)" :title="GetLocale('Download')" :disabled="restoring">
 										<i class="bi bi-download"></i>
 									</button>
-									<button class="btn btn-sm btn-outline-warning" @click="confirmRestore(backup.filename)" :title="GetLocale('Restore')">
+									<button class="btn btn-sm btn-outline-warning" @click="confirmRestore(backup.filename)" :title="GetLocale('Restore')" :disabled="restoring">
 										<i class="bi bi-arrow-counterclockwise"></i>
 									</button>
-									<button class="btn btn-sm btn-outline-danger" @click="confirmDelete(backup.filename)" :title="GetLocale('Delete')">
+									<button class="btn btn-sm btn-outline-danger" @click="confirmDelete(backup.filename)" :title="GetLocale('Delete')" :disabled="restoring">
 										<i class="bi bi-trash"></i>
 									</button>
 								</div>
@@ -134,12 +177,20 @@ export default {
 			auto_backup: false,
 			auto_backup_schedule: 'daily',
 			saving_settings: false,
-			sort_descending: true
+			sort_descending: true,
+			// ─── Restore Progress ───────────────────────
+			restoring: false,
+			restoreProgress: 0,
+			restoreStepLabel: '',
+			_restoreEventSource: null,
 		};
 	},
 	mounted() {
 		this.getBackups();
 		this.getSettings();
+	},
+	beforeUnmount() {
+		this._closeSSE();
 	},
 	computed: {
 		sortedBackups() {
@@ -239,22 +290,148 @@ export default {
 		},
 		confirmRestore(filename) {
 			if (confirm(this.GetLocale("CRITICAL WARNING: Restoring a global backup will OVERWRITE your current database, configurations, and settings. The application will undergo a HARD RESTART. Proceed?"))) {
-				this.restoreBackup(filename);
+				this.restoreBackup({filename});
 			}
 		},
-		async restoreBackup(filename) {
-			this.store.newMessage("WGDashboard", "Restoring backup. The dashboard will restart shortly...", "warning");
-			await fetchPost("/api/globalBackup/restore", {filename: filename}, (res) => {
-				if (res.status) {
-					this.store.newMessage("WGDashboard", "Restore initiated. System is rebooting.", "success");
-					setTimeout(() => {
-						window.location.reload();
-					}, 5000);
-				} else {
-					this.store.newMessage("WGDashboard", res.message, "danger");
-				}
-			});
+
+		// ─── Restore Progress Helpers ─────────────────────────────────
+		_closeSSE() {
+			if (this._restoreEventSource) {
+				this._restoreEventSource.close();
+				this._restoreEventSource = null;
+			}
 		},
+		_getStepLabel(step) {
+			const labels = {
+				queued:              'Waiting to start...',
+				validating:          'Validating backup archive...',
+				extracting:          'Extracting backup files...',
+				restoring_configs:   'Restoring configuration files...',
+				restoring_wireguard: 'Restoring WireGuard interfaces...',
+				restoring_databases: 'Restoring databases...',
+				finalizing:          'Finalizing restore...',
+				done:                'Restore complete!',
+			};
+			return labels[step] || (step ? step : 'Processing...');
+		},
+		_beginProgressTracking(jobId) {
+			this._closeSSE();
+
+			const url = getUrl(`/api/globalBackup/restore/progress?job_id=${encodeURIComponent(jobId)}`);
+			const es = new EventSource(url);
+			this._restoreEventSource = es;
+
+			es.onmessage = (event) => {
+				let data;
+				try { data = JSON.parse(event.data); } catch { return; }
+
+				this.restoreProgress = data.pct || 0;
+				this.restoreStepLabel = this._getStepLabel(data.step);
+
+				if (data.error) {
+					this._closeSSE();
+					this.restoring = false;
+					this.store.newMessage("WGDashboard", data.error, "danger");
+					return;
+				}
+
+				if (data.done) {
+					this.restoreProgress = 100;
+					this.restoreStepLabel = this._getStepLabel('done');
+					this._closeSSE();
+					// Dashboard restarts via SIGTERM after 3s (server side).
+					// Keep polling until panel is back up, then reload.
+					this._waitForPanelRestart();
+				}
+			};
+
+			es.onerror = () => {
+				// SSE connection dropped — likely because the server is restarting.
+				this._closeSSE();
+				if (this.restoreProgress >= 95) {
+					// Looks like restore succeeded and server is restarting — wait and reload.
+					this._waitForPanelRestart();
+				} else if (this.restoring) {
+					this.restoring = false;
+					this.store.newMessage("WGDashboard", "Connection lost during restore. Please check server logs.", "danger");
+				}
+			};
+		},
+		_waitForPanelRestart() {
+			// Poll /api/getDashboardConfiguration every 2 seconds until server is back.
+			this.restoreStepLabel = 'Waiting for panel to restart...';
+			const maxAttempts = 60; // up to 2 min
+			let attempts = 0;
+			const poll = () => {
+				fetch('/api/getDashboardConfiguration', { method: 'GET' })
+					.then(r => {
+						if (r.ok) {
+							window.location.reload();
+						} else {
+							throw new Error('not ready');
+						}
+					})
+					.catch(() => {
+						attempts++;
+						if (attempts < maxAttempts) {
+							setTimeout(poll, 2000);
+						} else {
+							// Give up, just reload anyway
+							window.location.reload();
+						}
+					});
+			};
+			// Wait 3 seconds before first poll (give server time to start shutting down)
+			setTimeout(poll, 3000);
+		},
+
+		// ─── Restore entry points ─────────────────────────────────────
+		async restoreBackup({filename = null, formData = null} = {}) {
+			this.restoring = true;
+			this.restoreProgress = 0;
+			this.restoreStepLabel = this._getStepLabel('queued');
+
+			try {
+				let res;
+				if (formData) {
+					// Uploaded file — multipart POST
+					const headers = getHeaders();
+					delete headers['Content-Type'];
+					const response = await fetch(getUrl("/api/globalBackup/restore"), {
+						method: 'POST',
+						headers,
+						body: formData
+					});
+					res = await response.json();
+				} else {
+					// Existing backup — JSON POST
+					res = await new Promise((resolve) => {
+						fetchPost("/api/globalBackup/restore", {filename}, (r) => resolve(r));
+					});
+				}
+
+				if (!res.status) {
+					this.restoring = false;
+					this.store.newMessage("WGDashboard", res.message || "Failed to start restore", "danger");
+					return;
+				}
+
+				const jobId = res.data?.job_id;
+				if (!jobId) {
+					this.restoring = false;
+					this.store.newMessage("WGDashboard", "No job_id returned from server", "danger");
+					return;
+				}
+
+				this._beginProgressTracking(jobId);
+
+			} catch (error) {
+				console.error(error);
+				this.restoring = false;
+				this.store.newMessage("WGDashboard", "Error starting restore", "danger");
+			}
+		},
+
 		async uploadBackup(event) {
 			const file = event.target.files[0];
 			if (!file) return;
@@ -264,34 +441,9 @@ export default {
 				return;
 			}
 			if (confirm(this.GetLocale("CRITICAL WARNING: Restoring an uploaded backup will OVERWRITE your current database, configurations, and settings. The application will undergo a HARD RESTART. Proceed?"))) {
-				this.store.newMessage("WGDashboard", "Uploading and restoring backup...", "warning");
-				
 				const formData = new FormData();
 				formData.append('backupFile', file);
-				
-				try {
-					const headers = getHeaders();
-					delete headers['Content-Type']; // Let browser set multipart boundary
-					
-					const response = await fetch(getUrl("/api/globalBackup/restore"), {
-						method: 'POST',
-						headers: headers,
-						body: formData
-					});
-					
-					const res = await response.json();
-					if (res.status) {
-						this.store.newMessage("WGDashboard", "Restore initiated. System is rebooting.", "success");
-						setTimeout(() => {
-							window.location.reload();
-						}, 5000);
-					} else {
-						this.store.newMessage("WGDashboard", res.message || "Failed to restore", "danger");
-					}
-				} catch (error) {
-					console.error(error);
-					this.store.newMessage("WGDashboard", "Error uploading file", "danger");
-				}
+				await this.restoreBackup({formData});
 			}
 			event.target.value = null;
 		}
@@ -300,5 +452,13 @@ export default {
 </script>
 
 <style scoped>
-
+.restore-fade-enter-active,
+.restore-fade-leave-active {
+	transition: opacity 0.4s ease, transform 0.4s ease;
+}
+.restore-fade-enter-from,
+.restore-fade-leave-to {
+	opacity: 0;
+	transform: translateY(-8px);
+}
 </style>

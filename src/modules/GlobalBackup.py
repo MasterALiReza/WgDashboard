@@ -19,28 +19,64 @@ def calculate_sha256(file_path: str) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-def dump_database_to_sql(db_name: str) -> str:
+def dump_database_to_sql(db_name: str, dump_path: str = None) -> str:
     try:
-        engine = db.create_engine(ConnectionString(db_name))
+        cn = ConnectionString(db_name)
+        # Use sqlite3.iterdump if it's a SQLite database for much better performance
+        if cn.startswith('sqlite:///'):
+            import sqlite3
+            db_path = cn.split('sqlite:///')[1].split('?')[0]
+            con = sqlite3.connect(db_path)
+            
+            if dump_path:
+                with open(dump_path, 'w', encoding='utf-8') as f:
+                    for line in con.iterdump():
+                        f.write(line + "\n")
+                con.close()
+                return ""
+            else:
+                statements = [line for line in con.iterdump()]
+                con.close()
+                return "\n".join(statements)
+
+        # Fallback to SQLAlchemy for PostgreSQL/MySQL
+        engine = db.create_engine(cn)
         metadata = db.MetaData()
         metadata.reflect(bind=engine)
-        statements = []
+        
+        if dump_path:
+            f = open(dump_path, 'w', encoding='utf-8')
+        else:
+            statements = []
+            
+        def write_stmt(stmt):
+            if dump_path:
+                f.write(stmt + "\n")
+            else:
+                statements.append(stmt)
 
-        # Dump DDL (CREATE TABLE)
+        # Dump DDL
         for table in metadata.sorted_tables:
             ddl = str(CreateTable(table).compile(engine)).strip()
-            statements.append(f"{ddl};")
+            write_stmt(f"{ddl};")
 
-        # Dump DML (INSERT)
+        # Dump DML in chunks
         with engine.connect() as conn:
             for table in metadata.sorted_tables:
-                rows = conn.execute(table.select()).mappings().fetchall()
-                for row in rows:
-                    insert_stmt = table.insert().values(dict(row))
-                    compiled = str(insert_stmt.compile(compile_kwargs={"literal_binds": True})).strip()
-                    statements.append(f"{compiled};")
+                result = conn.execute(table.select())
+                while True:
+                    rows = result.fetchmany(5000)
+                    if not rows:
+                        break
+                    for row in rows:
+                        insert_stmt = table.insert().values(dict(row._mapping))
+                        compiled = str(insert_stmt.compile(compile_kwargs={"literal_binds": True})).strip()
+                        write_stmt(f"{compiled};")
 
         engine.dispose()
+        if dump_path:
+            f.close()
+            return ""
         return "\n".join(statements)
     except Exception as e:
         return f"-- Error dumping database {db_name}: {str(e)}\n"
@@ -187,10 +223,18 @@ class GlobalBackupManager:
                 databases_to_dump.append('wgdashboard_log')
 
             for db_name in databases_to_dump:
-                dump_sql = dump_database_to_sql(db_name)
                 dump_path = os.path.join(sql_target, f"{db_name}_dump.sql")
-                with open(dump_path, 'w', encoding='utf-8') as f:
-                    f.write(dump_sql)
+                # Let dump_database_to_sql stream directly into the file
+                dump_result = dump_database_to_sql(db_name, dump_path=dump_path)
+                
+                # If there's a returned string, it means an error occurred during dumping or it didn't stream
+                if dump_result:
+                    if dump_result.startswith("-- Error"):
+                        raise Exception(dump_result)
+                    else:
+                        # Fallback just in case it didn't stream
+                        with open(dump_path, 'w', encoding='utf-8') as f:
+                            f.write(dump_result)
                 manifest_files.append({
                     "path": f"sql/{db_name}_dump.sql",
                     "sha256": calculate_sha256(dump_path),

@@ -116,6 +116,11 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
         if cn_str.startswith('sqlite:///'):
             import sqlite3
             db_path = cn_str.split('sqlite:///')[1].split('?')[0]
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                except Exception:
+                    pass
             with sqlite3.connect(db_path, timeout=30.0) as con:
                 con.executescript(sql_content)
             return True

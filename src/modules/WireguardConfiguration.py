@@ -1448,7 +1448,7 @@ class WireguardConfiguration:
     def storeConfigurationInfo(self):
         try:
             with self.engine.begin() as conn:
-                conn.execute(
+                res = conn.execute(
                     self.infoTable.update().values(
                         {
                             "Info": self.configurationInfo.model_dump_json()
@@ -1457,6 +1457,16 @@ class WireguardConfiguration:
                         self.infoTable.c.ID == self.Name
                     )
                 )
+                if res.rowcount == 0:
+                    conn.execute(
+                        self.infoTable.insert().values(
+                            {
+                                "ID": self.Name,
+                                "Info": self.configurationInfo.model_dump_json()
+                            }
+                        )
+                    )
+            return True
         except Exception as e:
             return False
         

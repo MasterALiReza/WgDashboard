@@ -63,6 +63,7 @@ const submitForm = async () => {
 			</label>
 			<input type="text" class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.DNS"
 				   id="override_DNS">
 			<div class="invalid-feedback">{{ errorMsg }}</div>
@@ -75,6 +76,7 @@ const submitForm = async () => {
 			</label>
 			<input type="text" class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.EndpointAllowedIPs"
 				   id="override_EndpointAllowedIPs">
 			<div class="invalid-feedback">{{ errorMsg }}</div>
@@ -87,6 +89,7 @@ const submitForm = async () => {
 			</label>
 			<input type="text" class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.ListenPort"
 				   id="override_ListenPort">
 			<div class="invalid-feedback">{{ errorMsg }}</div>
@@ -100,6 +103,7 @@ const submitForm = async () => {
 			<input type="text"
 				   class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.MTU"
 				   id="override_MTU">
 			<div class="invalid-feedback">{{ errorMsg }}</div>
@@ -112,6 +116,7 @@ const submitForm = async () => {
 			</label>
 			<input type="text" class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.PeerRemoteEndpoint"
 				   id="override_PeerRemoteEndpoint">
 		</div>
@@ -123,6 +128,7 @@ const submitForm = async () => {
 			</label>
 			<input type="text" class="form-control form-control-sm rounded-3"
 				   :disabled="saving"
+				   @input="edited = true"
 				   v-model="overridePeerSettings.PersistentKeepalive"
 				   id="override_PersistentKeepalive">
 			<div class="invalid-feedback">{{ errorMsg }}</div>

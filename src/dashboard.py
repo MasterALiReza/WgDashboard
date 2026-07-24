@@ -1601,7 +1601,8 @@ def API_Welcome_VerifyTotpLink():
 @app.post(f'{APP_PREFIX}/api/Welcome_Finish')
 def API_Welcome_Finish():
     data = request.get_json()
-    if DashboardConfig.GetConfig("Other", "welcome_session")[1]:
+    is_welcome = DashboardConfig.GetConfig("Other", "welcome_session")[1] is True or str(DashboardConfig.GetConfig("Other", "welcome_session")[1]).strip().lower() == 'true'
+    if is_welcome:
         if data["username"] == "":
             return ResponseObject(False, "Username cannot be blank.")
 
@@ -1619,7 +1620,9 @@ def API_Welcome_Finish():
             return ResponseObject(False, f"{updateUsernameErr},{updatePasswordErr}".strip(","))
 
         DashboardConfig.SetConfig("Other", "welcome_session", False)
-    return ResponseObject()
+        return ResponseObject()
+    else:
+        return ResponseObject(False, "Welcome session is not active.")
 
 class Locale:
     def __init__(self):

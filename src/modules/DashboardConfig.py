@@ -245,7 +245,7 @@ class DashboardConfig:
                 return False, f"{value} is not a valid path"
         if section == "Account" and key == "password":
             if self.GetConfig("Account", "password")[0]:
-                is_welcome = str(self.GetConfig("Other", "welcome_session")[1]).lower() == 'true'
+                is_welcome = self.GetConfig("Other", "welcome_session")[1] is True or str(self.GetConfig("Other", "welcome_session")[1]).strip().lower() == 'true'
                 if not is_welcome:
                     if not self.__checkPassword(
                             value["currentPassword"], self.GetConfig("Account", "password")[1].encode("utf-8")):
@@ -329,10 +329,11 @@ class DashboardConfig:
             if section == "WireGuardConfiguration" and key == "autostart":
                 return True, list(filter(lambda x: len(x) > 0, self.__config[section][key].split("||")))
 
-            if self.__config[section][key] in ["1", "yes", "true", "on"]:
+            val_str = str(self.__config[section][key]).strip().lower()
+            if val_str in ["1", "yes", "true", "on"]:
                 return True, True
 
-            if self.__config[section][key] in ["0", "no", "false", "off"]:
+            if val_str in ["0", "no", "false", "off"]:
                 return True, False
 
 

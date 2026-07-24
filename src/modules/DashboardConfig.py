@@ -245,9 +245,11 @@ class DashboardConfig:
                 return False, f"{value} is not a valid path"
         if section == "Account" and key == "password":
             if self.GetConfig("Account", "password")[0]:
-                if not self.__checkPassword(
-                        value["currentPassword"], self.GetConfig("Account", "password")[1].encode("utf-8")):
-                    return False, "Current password does not match."
+                is_welcome = str(self.GetConfig("Other", "welcome_session")[1]).lower() == 'true'
+                if not is_welcome:
+                    if not self.__checkPassword(
+                            value["currentPassword"], self.GetConfig("Account", "password")[1].encode("utf-8")):
+                        return False, "Current password does not match."
                 if value["newPassword"] != value["repeatNewPassword"]:
                     return False, "New passwords does not match"
         return True, ""

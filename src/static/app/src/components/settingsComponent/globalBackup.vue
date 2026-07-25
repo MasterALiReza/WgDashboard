@@ -398,9 +398,10 @@ export default {
 				if (formData) {
 					// Uploaded file — XHR for real-time upload progress
 					this.restoreStepLabel = 'Uploading backup file... (0%)';
-					res = await new Promise((resolve, reject) => {
+					res = await new Promise((resolve) => {
 						const xhr = new XMLHttpRequest();
 						xhr.open("POST", getUrl("/api/globalBackup/restore"));
+						xhr.withCredentials = true;
 
 						const headers = getHeaders();
 						delete headers['Content-Type']; // Let browser set multipart boundary
@@ -418,15 +419,23 @@ export default {
 						};
 
 						xhr.onload = () => {
+							let json = null;
 							try {
-								const json = JSON.parse(xhr.responseText);
+								json = JSON.parse(xhr.responseText);
+							} catch (err) {}
+
+							if (json && typeof json.status !== 'undefined') {
 								resolve(json);
-							} catch (err) {
-								reject(new Error("Invalid server response during upload"));
+							} else if (xhr.status === 413) {
+								resolve({ status: false, message: "File size exceeds server upload limit (HTTP 413 Payload Too Large). Please increase client_max_body_size in Nginx." });
+							} else if (xhr.status === 401) {
+								resolve({ status: false, message: "Authentication session ended. Please sign in again (HTTP 401)." });
+							} else {
+								resolve({ status: false, message: `Server error during upload (HTTP ${xhr.status}): ${xhr.statusText || 'Upload aborted'}` });
 							}
 						};
 
-						xhr.onerror = () => reject(new Error("Network error during file upload"));
+						xhr.onerror = () => resolve({ status: false, message: "Network connection lost or blocked during upload." });
 						xhr.send(formData);
 					});
 				} else {

@@ -279,104 +279,119 @@ class Peer:
     def resetDataUsage(self, mode: str):
         try:
             with self.configuration.engine.begin() as conn:
+                cur_recv = self.total_receive or 0
+                cur_sent = self.total_sent or 0
+                cur_total = cur_recv + cur_sent
+
                 if mode == "total":
-                    peer_total_receive = (self.cumu_receive or 0) + (self.total_receive or 0)
-                    peer_total_sent    = (self.cumu_sent or 0) + (self.total_sent or 0)
-                    peer_total_data    = (self.cumu_data or 0) + (self.total_data or 0)
+                    peer_total_receive = (self.cumu_receive or 0) + cur_recv
+                    peer_total_sent    = (self.cumu_sent or 0) + cur_sent
+                    peer_total_data    = (self.cumu_data or 0) + (self.total_data or cur_total)
                     if peer_total_data > 0 or peer_total_receive > 0 or peer_total_sent > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, peer_total_sent, peer_total_data
                         )
+                    
+                    new_cumu_recv = -cur_recv
+                    new_cumu_sent = -cur_sent
+                    new_cumu_data = -cur_total
+
                     conn.execute(
                         self.configuration.peersTable.update().values({
-                            "total_data": 0,
-                            "cumu_data": 0,
-                            "total_receive": 0,
-                            "cumu_receive": 0,
-                            "total_sent": 0,
-                            "cumu_sent": 0
+                            "total_data": cur_total,
+                            "cumu_data": new_cumu_data,
+                            "total_receive": cur_recv,
+                            "cumu_receive": new_cumu_recv,
+                            "total_sent": cur_sent,
+                            "cumu_sent": new_cumu_sent
                         }).where(
                             self.configuration.peersTable.c.id == self.id
                         )
                     )
                     conn.execute(
                         self.configuration.peersRestrictedTable.update().values({
-                            "total_data": 0,
-                            "cumu_data": 0,
-                            "total_receive": 0,
-                            "cumu_receive": 0,
-                            "total_sent": 0,
-                            "cumu_sent": 0
+                            "total_data": cur_total,
+                            "cumu_data": new_cumu_data,
+                            "total_receive": cur_recv,
+                            "cumu_receive": new_cumu_recv,
+                            "total_sent": cur_sent,
+                            "cumu_sent": new_cumu_sent
                         }).where(
                             self.configuration.peersRestrictedTable.c.id == self.id
                         )
                     )
-                    self.total_data = 0
-                    self.total_receive = 0
-                    self.total_sent = 0
-                    self.cumu_data = 0
-                    self.cumu_sent = 0
-                    self.cumu_receive = 0
+                    self.total_data = cur_total
+                    self.total_receive = cur_recv
+                    self.total_sent = cur_sent
+                    self.cumu_data = new_cumu_data
+                    self.cumu_sent = new_cumu_sent
+                    self.cumu_receive = new_cumu_recv
                 elif mode == "receive":
-                    peer_total_receive = (self.cumu_receive or 0) + (self.total_receive or 0)
+                    peer_total_receive = (self.cumu_receive or 0) + cur_recv
                     if peer_total_receive > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, 0, peer_total_receive
                         )
+                    new_cumu_recv = -cur_recv
+                    cumu_sent = self.cumu_sent or 0
+
                     conn.execute(
                         self.configuration.peersTable.update().values({
-                            "total_receive": 0,
-                            "cumu_receive": 0,
-                            "total_data": self.total_sent or 0,
-                            "cumu_data": self.cumu_sent or 0
+                            "total_receive": cur_recv,
+                            "cumu_receive": new_cumu_recv,
+                            "total_data": cur_recv + cur_sent,
+                            "cumu_data": new_cumu_recv + cumu_sent
                         }).where(
                             self.configuration.peersTable.c.id == self.id
                         )
                     )
                     conn.execute(
                         self.configuration.peersRestrictedTable.update().values({
-                            "total_receive": 0,
-                            "cumu_receive": 0,
-                            "total_data": self.total_sent or 0,
-                            "cumu_data": self.cumu_sent or 0
+                            "total_receive": cur_recv,
+                            "cumu_receive": new_cumu_recv,
+                            "total_data": cur_recv + cur_sent,
+                            "cumu_data": new_cumu_recv + cumu_sent
                         }).where(
                             self.configuration.peersRestrictedTable.c.id == self.id
                         )
                     )
-                    self.cumu_receive = 0
-                    self.total_receive = 0
-                    self.total_data = self.total_sent or 0
-                    self.cumu_data = self.cumu_sent or 0
+                    self.cumu_receive = new_cumu_recv
+                    self.total_receive = cur_recv
+                    self.total_data = cur_recv + cur_sent
+                    self.cumu_data = new_cumu_recv + cumu_sent
                 elif mode == "sent":
-                    peer_total_sent = (self.cumu_sent or 0) + (self.total_sent or 0)
+                    peer_total_sent = (self.cumu_sent or 0) + cur_sent
                     if peer_total_sent > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, 0, peer_total_sent, peer_total_sent
                         )
+                    new_cumu_sent = -cur_sent
+                    cumu_recv = self.cumu_receive or 0
+
                     conn.execute(
                         self.configuration.peersTable.update().values({
-                            "total_sent": 0,
-                            "cumu_sent": 0,
-                            "total_data": self.total_receive or 0,
-                            "cumu_data": self.cumu_receive or 0
+                            "total_sent": cur_sent,
+                            "cumu_sent": new_cumu_sent,
+                            "total_data": cur_sent + cur_recv,
+                            "cumu_data": new_cumu_sent + cumu_recv
                         }).where(
                             self.configuration.peersTable.c.id == self.id
                         )
                     )
                     conn.execute(
                         self.configuration.peersRestrictedTable.update().values({
-                            "total_sent": 0,
-                            "cumu_sent": 0,
-                            "total_data": self.total_receive or 0,
-                            "cumu_data": self.cumu_receive or 0
+                            "total_sent": cur_sent,
+                            "cumu_sent": new_cumu_sent,
+                            "total_data": cur_sent + cur_recv,
+                            "cumu_data": new_cumu_sent + cumu_recv
                         }).where(
                             self.configuration.peersRestrictedTable.c.id == self.id
                         )
                     )
-                    self.cumu_sent = 0
-                    self.total_sent = 0
-                    self.total_data = self.total_receive or 0
-                    self.cumu_data = self.cumu_receive or 0
+                    self.cumu_sent = new_cumu_sent
+                    self.total_sent = cur_sent
+                    self.total_data = cur_sent + cur_recv
+                    self.cumu_data = new_cumu_sent + cumu_recv
                 else:
                     return False
         except Exception as e:

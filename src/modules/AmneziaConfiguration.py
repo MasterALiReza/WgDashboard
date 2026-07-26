@@ -181,76 +181,72 @@ class AmneziaConfiguration(WireguardConfiguration):
                 pCounter = -1
                 content = configFile.read().split('\n')
                 try:
-                    if "[Peer]" not in content:
-                        current_app.logger.info(f"{self.Name} config has no [Peer] section")
-                        return
-
-                    peerStarts = content.index("[Peer]")
-                    content = content[peerStarts:]
-                    for i in content:
-                        if not RegexMatch("#(.*)", i) and not RegexMatch(";(.*)", i):
-                            if i == "[Peer]":
-                                pCounter += 1
-                                p.append({})
-                                p[pCounter]["name"] = ""
-                            else:
-                                if len(i) > 0:
-                                    split = re.split(r'\s*=\s*', i, 1)
-                                    if len(split) == 2:
-                                        p[pCounter][split[0]] = split[1]
-
-                        if RegexMatch("#Name# = (.*)", i):
-                            split = re.split(r'\s*=\s*', i, 1)
-                            if len(split) == 2:
-                                p[pCounter]["name"] = split[1]
-                    with self.engine.begin() as conn:
-                        for i in p:
-                            if "PublicKey" in i.keys():
-                                tempPeer = conn.execute(self.peersTable.select().where(
-                                    self.peersTable.columns.id == i['PublicKey']
-                                )).mappings().fetchone()
-                                if tempPeer is None:
-                                    tempPeer = {
-                                        "id": i['PublicKey'],
-                                        "private_key": "",
-                                        "DNS": self.DashboardConfig.GetConfig("Peers", "peer_global_DNS")[1],
-                                        "endpoint_allowed_ip": self.DashboardConfig.GetConfig("Peers", "peer_endpoint_allowed_ip")[1],
-                                        "name": i.get("name"),
-                                        "total_receive": 0,
-                                        "total_sent": 0,
-                                        "total_data": 0,
-                                        "endpoint": "N/A",
-                                        "status": "stopped",
-                                        "latest_handshake": "N/A",
-                                        "allowed_ip": i.get("AllowedIPs", "N/A"),
-                                        "cumu_receive": 0,
-                                        "cumu_sent": 0,
-                                        "cumu_data": 0,
-                                        "mtu": self.DashboardConfig.GetConfig("Peers", "peer_mtu")[1],
-                                        "keepalive": self.DashboardConfig.GetConfig("Peers", "peer_keep_alive")[1],
-                                        "notes": "",
-                                        "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
-                                        "preshared_key": i["PresharedKey"] if "PresharedKey" in i.keys() else ""
-                                    }
-                                    conn.execute(
-                                        self.peersTable.insert().values(tempPeer)
-                                    )
+                    if "[Peer]" in content:
+                        peerStarts = content.index("[Peer]")
+                        content = content[peerStarts:]
+                        for i in content:
+                            if not RegexMatch("#(.*)", i) and not RegexMatch(";(.*)", i):
+                                if i == "[Peer]":
+                                    pCounter += 1
+                                    p.append({})
+                                    p[pCounter]["name"] = ""
                                 else:
-                                    conn.execute(
-                                        self.peersTable.update().values({
-                                            "allowed_ip": i.get("AllowedIPs", "N/A")
-                                        }).where(
-                                            self.peersTable.columns.id == i['PublicKey']
+                                    if len(i) > 0:
+                                        split = re.split(r'\s*=\s*', i, 1)
+                                        if len(split) == 2:
+                                            p[pCounter][split[0]] = split[1]
+
+                            if RegexMatch("#Name# = (.*)", i):
+                                split = re.split(r'\s*=\s*', i, 1)
+                                if len(split) == 2:
+                                    p[pCounter]["name"] = split[1]
+                        with self.engine.begin() as conn:
+                            for i in p:
+                                if "PublicKey" in i.keys():
+                                    tempPeer = conn.execute(self.peersTable.select().where(
+                                        self.peersTable.columns.id == i['PublicKey']
+                                    )).mappings().fetchone()
+                                    if tempPeer is None:
+                                        tempPeer = {
+                                            "id": i['PublicKey'],
+                                            "private_key": "",
+                                            "DNS": self.DashboardConfig.GetConfig("Peers", "peer_global_DNS")[1],
+                                            "endpoint_allowed_ip": self.DashboardConfig.GetConfig("Peers", "peer_endpoint_allowed_ip")[1],
+                                            "name": i.get("name"),
+                                            "total_receive": 0,
+                                            "total_sent": 0,
+                                            "total_data": 0,
+                                            "endpoint": "N/A",
+                                            "status": "stopped",
+                                            "latest_handshake": "N/A",
+                                            "allowed_ip": i.get("AllowedIPs", "N/A"),
+                                            "cumu_receive": 0,
+                                            "cumu_sent": 0,
+                                            "cumu_data": 0,
+                                            "mtu": self.DashboardConfig.GetConfig("Peers", "peer_mtu")[1],
+                                            "keepalive": self.DashboardConfig.GetConfig("Peers", "peer_keep_alive")[1],
+                                            "notes": "",
+                                            "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
+                                            "preshared_key": i["PresharedKey"] if "PresharedKey" in i.keys() else ""
+                                        }
+                                        conn.execute(
+                                            self.peersTable.insert().values(tempPeer)
                                         )
-                                    )
-                                self.Peers.append(AmneziaPeer(tempPeer, self))
+                                    else:
+                                        conn.execute(
+                                            self.peersTable.update().values({
+                                                "allowed_ip": i.get("AllowedIPs", "N/A")
+                                            }).where(
+                                                self.peersTable.columns.id == i['PublicKey']
+                                            )
+                                        )
                 except Exception as e:
                     current_app.logger.error(f"{self.Name} getPeers() Error: {e}")
-        else:
-            with self.engine.connect() as conn:
-                existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
-                for i in existingPeers:
-                    self.Peers.append(AmneziaPeer(i, self))
+        
+        with self.engine.connect() as conn:
+            existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
+            for i in existingPeers:
+                self.Peers.append(AmneziaPeer(i, self))
 
     def addPeers(self, peers: list) -> tuple[bool, list, str]:
         result = {

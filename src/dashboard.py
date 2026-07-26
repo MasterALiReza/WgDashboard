@@ -290,7 +290,8 @@ def auth_req():
 
     _maintenance_whitelist = ('/api/globalBackup/restore', '/api/globalBackup/restore/progress')
     if app.config.get('MAINTENANCE_MODE', False) and not any(request.path.endswith(p) for p in _maintenance_whitelist):
-        return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
+        if request.path.startswith('/api/'):
+            return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
 
     DashboardConfig.APIAccessed = False    
     authenticationRequired = DashboardConfig.GetConfig("Server", "auth_req")[1]

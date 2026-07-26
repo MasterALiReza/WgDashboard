@@ -992,19 +992,23 @@ class WireguardConfiguration:
         if self.Status:
             try:
                 command = [f"{self.Protocol}-quick", "down", self.Name]
-                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=60)
 
                 self.removeAutostart()
             except subprocess.CalledProcessError as exc:
                 return False, str(exc.output.strip().decode("utf-8"))
+            except Exception as e:
+                return False, str(e)
         else:
             try:
                 command = [f"{self.Protocol}-quick", "up", self.Name]
-                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=60)
 
                 self.addAutostart()
             except subprocess.CalledProcessError as exc:
                 return False, str(exc.output.strip().decode("utf-8"))
+            except Exception as e:
+                return False, str(e)
         self.__parseConfigurationFile()
         self.getStatus()
         return True, None
@@ -1027,7 +1031,10 @@ class WireguardConfiguration:
                 if existing:
                     return dict(existing)
         except Exception as e:
-            current_app.logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
+            try:
+                current_app.logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
+            except Exception:
+                pass
         return None
 
     def _add_to_traffic_snapshot(self, conn, recv, sent, total):

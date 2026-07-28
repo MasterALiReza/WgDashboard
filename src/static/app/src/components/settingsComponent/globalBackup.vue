@@ -13,6 +13,39 @@
 				<LocaleText t="Critical system snapshot and restoration utility. Proceed with caution." />
 			</p>
 
+			<!-- ─── Backup Progress Bar ─── -->
+			<transition name="restore-fade">
+				<div v-if="creating" class="mb-4 p-3 rounded-4 border" style="background: var(--bs-tertiary-bg);">
+					<div class="d-flex align-items-center justify-content-between mb-2">
+						<div class="d-flex align-items-center gap-2">
+							<span class="spinner-border spinner-border-sm text-primary" v-if="backupProgress < 100"></span>
+							<i class="bi bi-check-circle-fill text-success" v-else></i>
+							<span class="fw-semibold small">
+								<LocaleText t="Creating Backup..." />
+							</span>
+						</div>
+						<span class="badge text-bg-primary fw-bold">{{ backupProgress }}%</span>
+					</div>
+
+					<!-- Progress Bar -->
+					<div class="progress rounded-3 mb-2" style="height: 18px;">
+						<div
+							class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+							role="progressbar"
+							:style="{ width: backupProgress + '%' }"
+							:aria-valuenow="backupProgress"
+							aria-valuemin="0"
+							aria-valuemax="100"
+						></div>
+					</div>
+
+					<!-- Step label -->
+					<small class="text-muted d-block">
+						<i class="bi bi-arrow-right-circle me-1"></i>{{ backupStepLabel }}
+					</small>
+				</div>
+			</transition>
+
 			<!-- ─── Restore Progress Bar (inside card) ─── -->
 			<transition name="restore-fade">
 				<div v-if="restoring" class="mb-4 p-3 rounded-4 border" style="background: var(--bs-tertiary-bg);">
@@ -180,6 +213,10 @@ export default {
 			auto_backup_schedule: 'daily',
 			saving_settings: false,
 			sort_descending: true,
+			// ─── Backup Progress ────────────────────────
+			backupProgress: 0,
+			backupStepLabel: '',
+			_backupEventSource: null,
 			// ─── Restore Progress ───────────────────────
 			restoring: false,
 			restoreProgress: 0,
@@ -193,6 +230,7 @@ export default {
 	},
 	beforeUnmount() {
 		this._closeSSE();
+		this._closeBackupSSE();
 	},
 	computed: {
 		sortedBackups() {
@@ -262,14 +300,15 @@ export default {
 		},
 		async createBackup() {
 			this.creating = true;
+			this.backupProgress = 0;
+			this.backupStepLabel = 'Initializing...';
 			await fetchPost("/api/globalBackup/create", {}, (res) => {
-				if (res.status) {
-					this.store.newMessage("WGDashboard", "Global backup created successfully", "success");
-					this.getBackups();
+				if (res.status && res.data && res.data.job_id) {
+					this._beginBackupProgressTracking(res.data.job_id);
 				} else {
 					this.store.newMessage("WGDashboard", res.message, "danger");
+					this.creating = false;
 				}
-				this.creating = false;
 			});
 		},
 		confirmDelete(filename) {
@@ -316,6 +355,66 @@ export default {
 				done:                'Restore complete! Restarting dashboard...',
 			};
 			return labels[step] || (step ? step : 'Processing...');
+		},
+		_closeBackupSSE() {
+			if (this._backupEventSource) {
+				this._backupEventSource.close();
+				this._backupEventSource = null;
+			}
+		},
+		_getBackupStepLabel(step) {
+			const labels = {
+				initializing:          'Initializing backup process...',
+				gathering_configs:     'Gathering configuration files...',
+				backing_up_interfaces: 'Backing up WireGuard interfaces...',
+				dumping_databases:     'Creating database snapshots...',
+				creating_manifest:     'Generating backup manifest...',
+				creating_archive:      'Compressing backup archive...',
+				done:                  'Backup completed successfully!',
+			};
+			return labels[step] || (step ? step : 'Processing...');
+		},
+		_beginBackupProgressTracking(jobId) {
+			this._closeBackupSSE();
+
+			const url = getUrl(`/api/globalBackup/create/progress/${encodeURIComponent(jobId)}`);
+			const es = new EventSource(url);
+			this._backupEventSource = es;
+
+			es.onmessage = (event) => {
+				let data;
+				try { data = JSON.parse(event.data); } catch { return; }
+
+				this.backupProgress = data.pct || 0;
+				this.backupStepLabel = this._getBackupStepLabel(data.step);
+
+				if (data.error) {
+					this._closeBackupSSE();
+					this.creating = false;
+					this.store.newMessage("WGDashboard", data.error, "danger");
+					return;
+				}
+
+				if (data.done) {
+					this.backupProgress = 100;
+					this.backupStepLabel = this._getBackupStepLabel('done');
+					this._closeBackupSSE();
+					
+					setTimeout(() => {
+						this.creating = false;
+						this.store.newMessage("WGDashboard", "Global backup created successfully", "success");
+						this.getBackups();
+					}, 2000);
+				}
+			};
+
+			es.onerror = () => {
+				this._closeBackupSSE();
+				if (this.creating) {
+					this.creating = false;
+					this.store.newMessage("WGDashboard", "Connection lost during backup.", "danger");
+				}
+			};
 		},
 		_beginProgressTracking(jobId) {
 			this._closeSSE();

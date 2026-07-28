@@ -1468,11 +1468,13 @@ class WireguardConfiguration:
         if key == "Description":
             self.configurationInfo.Description = value
         elif key == "OverridePeerSettings":
-            for (key, val) in value.items():
+            for (sub_key, val) in value.items():
                 try:
-                    status, msg = self.__validateOverridePeerSettings(key, _jinja_env.from_string(val).render(configuration=self.toJson()))
-                    if not status:
-                        return False, msg, key
+                    if val is not None and str(val).strip() != "":
+                        rendered_val = _jinja_env.from_string(str(val)).render(configuration=self.toJson())
+                        status, msg = self.__validateOverridePeerSettings(sub_key, rendered_val)
+                        if not status:
+                            return False, msg, sub_key
                 except Exception as e:
                     return False, str(e), None
             self.configurationInfo.OverridePeerSettings = (

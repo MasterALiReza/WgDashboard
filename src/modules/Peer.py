@@ -247,7 +247,11 @@ class Peer:
                 if val is not None and ((type(val) is str and len(val) > 0) or (type(val) is int and val > 0)):
                     final["file"] += f"{key} = {val}\n"
 
-        final["file"] = _jinja_env.from_string(final["file"]).render(configuration=self.configuration)
+        try:
+            final["file"] = _jinja_env.from_string(final["file"]).render(configuration=self.configuration)
+        except Exception:
+            # Fallback to the raw string if Jinja rendering fails due to user input containing invalid template syntax
+            pass
 
 
         if self.configuration.Protocol == "awg":

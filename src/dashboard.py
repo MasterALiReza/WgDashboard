@@ -33,7 +33,7 @@ from modules.PeerJobs import PeerJobs
 from modules.DashboardConfig import DashboardConfig
 from modules.WireguardConfiguration import WireguardConfiguration
 from modules.AmneziaConfiguration import AmneziaConfiguration
-from modules.GlobalBackup import GlobalBackupManager, _restore_jobs, _restore_jobs_lock, _cleanup_expired_jobs
+from modules.GlobalBackup import GlobalBackupManager, _restore_jobs, _restore_jobs_lock, _cleanup_expired_jobs, _backup_jobs, _backup_jobs_lock, _is_backup_running_lock
 
 from client import createClientBlueprint
 
@@ -168,13 +168,29 @@ def globalBackupBackgroundThread():
                             should_backup = True
                             
                         if should_backup:
-                            app.logger.info(f"Starting scheduled global backup ({schedule})")
-                            success, result = GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
-                            if success:
-                                last_backup_time = now
-                                app.logger.info(f"Scheduled global backup completed successfully: {result.get('filename') if isinstance(result, dict) else result}")
-                            else:
-                                app.logger.error(f"Scheduled global backup failed: {result}")
+                            if app.config.get('MAINTENANCE_MODE', False):
+                                app.logger.warning("Skipping scheduled backup because system is in maintenance mode.")
+                                continue
+                            
+                            import modules.GlobalBackup
+                            can_run = False
+                            with _is_backup_running_lock:
+                                if not modules.GlobalBackup._is_backup_running:
+                                    modules.GlobalBackup._is_backup_running = True
+                                    can_run = True
+                            
+                            if can_run:
+                                try:
+                                    app.logger.info(f"Starting scheduled global backup ({schedule})")
+                                    success, result = GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
+                                    if success:
+                                        last_backup_time = now
+                                        app.logger.info(f"Scheduled global backup completed successfully: {result.get('filename') if isinstance(result, dict) else result}")
+                                    else:
+                                        app.logger.error(f"Scheduled global backup failed: {result}")
+                                finally:
+                                    with _is_backup_running_lock:
+                                        modules.GlobalBackup._is_backup_running = False
             except Exception as e:
                 app.logger.error(f"Background Thread #3 Error: {e}")
             time.sleep(60)
@@ -735,20 +751,75 @@ def API_listGlobalBackups():
 
 @app.post(f'{APP_PREFIX}/api/globalBackup/create')
 def API_createGlobalBackup():
+    import modules.GlobalBackup
     data = request.get_json(silent=True) or {}
     label = data.get('label', '')
     include_logs = data.get('includeLogs', True)
     include_existing = data.get('includeExistingBackups', False)
     
-    status, result = GlobalBackupManager.create_global_backup(
-        label=label,
-        include_logs=include_logs,
-        include_existing_backups=include_existing
-    )
-    if not status:
-        return ResponseObject(False, f"Failed to create global backup: {result}", status_code=500)
+    if app.config.get('MAINTENANCE_MODE', False):
+        return ResponseObject(False, "Cannot create backup while system is in maintenance mode or restoring.", status_code=409)
+
+    with _is_backup_running_lock:
+        if modules.GlobalBackup._is_backup_running:
+            return ResponseObject(False, "A backup or restore job is currently running.", status_code=409)
+        modules.GlobalBackup._is_backup_running = True
+
+    job_id = str(uuid.uuid4())
+    with _backup_jobs_lock:
+        _backup_jobs[job_id] = {
+            "pct": 0,
+            "step": "initializing",
+            "done": False,
+            "error": None,
+            "filename": None,
+            "created_at": datetime.utcnow()
+        }
+
+    def _do_backup(jid: str, lbl: str, inc_logs: bool, inc_ext: bool):
+        try:
+            status, result = GlobalBackupManager.create_global_backup(
+                label=lbl,
+                include_logs=inc_logs,
+                include_existing_backups=inc_ext,
+                job_id=jid
+            )
+            with _backup_jobs_lock:
+                if status:
+                    _backup_jobs[jid].update({"done": True, "pct": 100, "step": "done", "filename": result.get("filename"), "finished_at": datetime.utcnow()})
+                else:
+                    _backup_jobs[jid].update({"done": True, "error": str(result), "finished_at": datetime.utcnow()})
+        except Exception as e:
+            with _backup_jobs_lock:
+                _backup_jobs[jid].update({"done": True, "error": str(e), "finished_at": datetime.utcnow()})
+        finally:
+            with _is_backup_running_lock:
+                modules.GlobalBackup._is_backup_running = False
+
+    t = threading.Thread(target=_do_backup, args=(job_id, label, include_logs, include_existing), daemon=True)
+    t.start()
     
-    return ResponseObject(True, "Global backup created successfully", data=result)
+    return ResponseObject(True, "Global backup started successfully", data={"job_id": job_id})
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/create/progress/<job_id>')
+def API_createGlobalBackup_progress(job_id):
+    def event_stream():
+        while True:
+            _cleanup_expired_jobs()
+            with _backup_jobs_lock:
+                info = _backup_jobs.get(job_id)
+            
+            if not info:
+                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                break
+                
+            yield f"data: {json.dumps(info, default=str)}\n\n"
+            
+            if info.get("done"):
+                break
+            time.sleep(1)
+            
+    return Response(event_stream(), mimetype="text/event-stream")
 
 @app.post(f'{APP_PREFIX}/api/globalBackup/delete')
 def API_deleteGlobalBackup():
@@ -1779,8 +1850,8 @@ def API_Email_Send():
     data = request.get_json()
     if "Receiver" not in data.keys() or "Subject" not in data.keys():
         return ResponseObject(False, "Please at least specify receiver and subject")
-    body = data.get('Body', '')
-    subject = data.get('Subject','')
+    body = str(data.get('Body') or '')
+    subject = str(data.get('Subject') or '')
     download = None
     if ("ConfigurationName" in data.keys() 
             and "Peer" in data.keys()):
@@ -1790,10 +1861,14 @@ def API_Email_Send():
             if configuration is not None:
                 fp, p = configuration.searchPeer(data.get('Peer'))
                 if fp:
-                    template = _jinja_env.from_string(body)
-                    download = p.downloadPeer()
-                    body = template.render(peer=p.toJson(), configurationFile=download)
-                    subject = _jinja_env.from_string(data.get('Subject', '')).render(peer=p.toJson(), configurationFile=download)
+                    try:
+                        template = _jinja_env.from_string(body)
+                        download = p.downloadPeer()
+                        body = template.render(peer=p.toJson(), configurationFile=download)
+                        subject = _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
+                    except Exception as e:
+                        return ResponseObject(False, f"Template rendering failed: {str(e)}")
+
                     if data.get('IncludeAttachment', False):
                         u = str(uuid4())
                         attachmentName = f'{u}.conf'
@@ -1808,8 +1883,8 @@ def API_Email_Send():
 @app.post(f'{APP_PREFIX}/api/email/preview')
 def API_Email_PreviewBody():
     data = request.get_json()
-    subject = data.get('Subject', '')
-    body = data.get('Body', '')
+    subject = str(data.get('Subject') or '')
+    body = str(data.get('Body') or '')
     
     if ("ConfigurationName" not in data.keys() 
             or "Peer" not in data.keys() or data.get('ConfigurationName') not in WireguardConfigurations.keys()):
@@ -1824,7 +1899,7 @@ def API_Email_PreviewBody():
         template = _jinja_env.from_string(body)
         download = p.downloadPeer()
         return ResponseObject(data={
-            "Body": _jinja_env.from_string(body).render(peer=p.toJson(), configurationFile=download),
+            "Body": template.render(peer=p.toJson(), configurationFile=download),
             "Subject": _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
         })
     except Exception as e:

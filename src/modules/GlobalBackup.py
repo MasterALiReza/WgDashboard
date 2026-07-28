@@ -18,6 +18,15 @@ GLOBAL_BACKUP_DIR = os.getenv('GLOBAL_BACKUP_PATH', os.path.join(os.getenv('CONF
 _restore_jobs: dict = {}
 _restore_jobs_lock = threading.Lock()
 
+# ─── Backup Job Tracking ─────────────────────────────────────────────────────
+# Thread-safe dict: { job_id: {pct, step, done, error, created_at} }
+_backup_jobs: dict = {}
+_backup_jobs_lock = threading.Lock()
+
+# Global state to prevent concurrent backup executions
+_is_backup_running = False
+_is_backup_running_lock = threading.Lock()
+
 JOB_TTL_SECONDS = 300  # پاکسازی job ها بعد از ۵ دقیقه از اتمام
 
 
@@ -28,6 +37,14 @@ def _report_progress(job_id: str | None, pct: int, step: str) -> None:
     with _restore_jobs_lock:
         if job_id in _restore_jobs:
             _restore_jobs[job_id].update({"pct": pct, "step": step})
+
+def _report_backup_progress(job_id: str | None, pct: int, step: str) -> None:
+    """Thread-safe progress reporter for backup jobs."""
+    if not job_id:
+        return
+    with _backup_jobs_lock:
+        if job_id in _backup_jobs:
+            _backup_jobs[job_id].update({"pct": pct, "step": step})
 
 
 def _cleanup_expired_jobs() -> None:
@@ -40,6 +57,14 @@ def _cleanup_expired_jobs() -> None:
         ]
         for jid in expired:
             del _restore_jobs[jid]
+
+    with _backup_jobs_lock:
+        expired_backup = [
+            jid for jid, info in _backup_jobs.items()
+            if info.get("done") and info.get("finished_at", datetime.utcnow()) < cutoff
+        ]
+        for jid in expired_backup:
+            del _backup_jobs[jid]
 
 def calculate_sha256(file_path: str) -> str:
     sha256_hash = hashlib.sha256()
@@ -155,7 +180,7 @@ class GlobalBackupManager:
         return GLOBAL_BACKUP_DIR
 
     @staticmethod
-    def create_global_backup(label: str = "", include_logs: bool = True, include_existing_backups: bool = False) -> tuple[bool, str | dict]:
+    def create_global_backup(label: str = "", include_logs: bool = True, include_existing_backups: bool = False, job_id: str | None = None) -> tuple[bool, str | dict]:
         try:
             backup_dir = GlobalBackupManager.get_backup_dir()
             timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -172,6 +197,7 @@ class GlobalBackupManager:
             interfaces_found = []
 
             # 1. Config files
+            _report_backup_progress(job_id, 10, "gathering_configs")
             config_path = os.getenv('CONFIGURATION_PATH', '.')
             ini_file = os.path.join(config_path, 'wg-dashboard.ini')
             if os.path.exists(ini_file):
@@ -208,6 +234,7 @@ class GlobalBackupManager:
                 shutil.copytree(plugins_dir, target_plugins, dirs_exist_ok=True)
 
             # 2. WireGuard interface configs (.conf)
+            _report_backup_progress(job_id, 30, "backing_up_interfaces")
             configs_target = os.path.join(temp_dir, 'configs')
             os.makedirs(configs_target, exist_ok=True)
             
@@ -255,6 +282,7 @@ class GlobalBackupManager:
                                         shutil.copytree(b_dir, dst_b_dir, dirs_exist_ok=True)
 
             # 3. Database dumps
+            _report_backup_progress(job_id, 50, "dumping_databases")
             sql_target = os.path.join(temp_dir, 'sql')
             os.makedirs(sql_target, exist_ok=True)
 
@@ -282,6 +310,7 @@ class GlobalBackupManager:
                 })
 
             # 4. Create MANIFEST.json
+            _report_backup_progress(job_id, 80, "creating_manifest")
             manifest = {
                 "version": "1.0",
                 "dashboard_version": "v4.3.3",
@@ -295,6 +324,7 @@ class GlobalBackupManager:
                 json.dump(manifest, f, indent=2)
 
             # 5. Create final ZIP archive
+            _report_backup_progress(job_id, 90, "creating_archive")
             zip_filename = f"{backup_name}.zip"
             zip_filepath = os.path.join(backup_dir, zip_filename)
 
@@ -311,6 +341,7 @@ class GlobalBackupManager:
             # Enforce retention policy
             GlobalBackupManager.enforce_retention_policy(10)
 
+            _report_backup_progress(job_id, 100, "done")
             return True, {
                 "filename": zip_filename,
                 "size": os.path.getsize(zip_filepath),

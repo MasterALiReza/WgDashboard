@@ -43,11 +43,6 @@ class AmneziaConfiguration(WireguardConfiguration):
     def toJson(self):
         self.Status = self.getStatus()
         
-        snapshot = self._get_traffic_snapshot()
-        snap_total = snapshot.get('total_data', 0) if snapshot else 0
-        snap_sent = snapshot.get('total_sent', 0) if snapshot else 0
-        snap_receive = snapshot.get('total_receive', 0) if snapshot else 0
-        
         return {
             "Status": self.Status,
             "Name": self.Name,
@@ -61,13 +56,9 @@ class AmneziaConfiguration(WireguardConfiguration):
             "PostDown": self.PostDown,
             "SaveConfig": self.SaveConfig,
             "Info": self.configurationInfo.model_dump(),
-            "DataUsage": {
-                "Total": sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.RestrictedPeers))) + snap_total,
-                "Sent": sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.RestrictedPeers))) + snap_sent,
-                "Receive": sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.RestrictedPeers))) + snap_receive
-            },
-            "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))),
-            "TotalPeers": len(self.Peers),
+            "DataUsage": self._compute_data_usage(),
+            "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))) + len(list(filter(lambda x: x.status == "running", self.RestrictedPeers))),
+            "TotalPeers": len(self.Peers) + len(self.RestrictedPeers),
             "Protocol": self.Protocol,
             "Table": self.Table,
             "Jc": self.Jc,

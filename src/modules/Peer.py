@@ -282,15 +282,33 @@ class Peer:
 
     def resetDataUsage(self, mode: str):
         try:
+            self.configuration._force_refresh_stats()
             with self.configuration.engine.begin() as conn:
-                cur_recv = self.total_receive or 0
-                cur_sent = self.total_sent or 0
+                stmt = self.configuration.peersTable.select().where(
+                    self.configuration.peersTable.c.id == self.id
+                )
+                row = conn.execute(stmt).mappings().fetchone()
+                if row:
+                    cur_recv = row.get('total_receive') or 0
+                    cur_sent = row.get('total_sent') or 0
+                    cumu_recv = row.get('cumu_receive') or 0
+                    cumu_sent = row.get('cumu_sent') or 0
+                    cumu_data = row.get('cumu_data') or 0
+                    total_data = row.get('total_data') or (cur_recv + cur_sent)
+                else:
+                    cur_recv = self.total_receive or 0
+                    cur_sent = self.total_sent or 0
+                    cumu_recv = self.cumu_receive or 0
+                    cumu_sent = self.cumu_sent or 0
+                    cumu_data = self.cumu_data or 0
+                    total_data = self.total_data or (cur_recv + cur_sent)
+
                 cur_total = cur_recv + cur_sent
 
                 if mode == "total":
-                    peer_total_receive = (self.cumu_receive or 0) + cur_recv
-                    peer_total_sent    = (self.cumu_sent or 0) + cur_sent
-                    peer_total_data    = (self.cumu_data or 0) + (self.total_data or cur_total)
+                    peer_total_receive = cumu_recv + cur_recv
+                    peer_total_sent    = cumu_sent + cur_sent
+                    peer_total_data    = cumu_data + total_data
                     if peer_total_data > 0 or peer_total_receive > 0 or peer_total_sent > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, peer_total_sent, peer_total_data

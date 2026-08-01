@@ -180,27 +180,27 @@ const clearDownload = () => {
 					     style="overflow-y: scroll">
 						<button type="button" class="btn w-100 peerBtn text-start rounded-3 d-flex align-items-center gap-3"
 						        @click="togglePeers(p.id)"
-						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning bg-warning-subtle text-dark' : '']"
+						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning bg-warning-subtle text-warning-emphasis' : '']"
 						        :key="p.id"
 						        :disabled="deleteConfirmation || downloadConfirmation"
 						        ref="sp"
 						        :data-id="p.id"
 						        v-for="p in searchPeers">
-							<span v-if="!downloadConfirmation">
+							<span v-if="!downloadConfirmation" class="flex-shrink-0">
 									<i class="bi"
 									   :class="[ selectedPeers.find(x => x === p.id) ? 'bi-check-circle-fill':'bi-circle', p.restricted && !selectedPeers.find(x => x === p.id) ? 'text-warning' : '']"
 									></i>
 								</span>
-							<span class="d-flex flex-column">
-								<small class="fw-bold" :class="{'text-warning-emphasis': p.restricted && !selectedPeers.find(x => x === p.id)}">
+							<span class="d-flex flex-column overflow-hidden" style="min-width: 0;">
+								<small class="fw-bold text-truncate" :class="{'text-warning-emphasis': p.restricted && !selectedPeers.find(x => x === p.id)}">
 									{{p.name ? p.name : "Untitled Peer"}}
 								</small>
-								<small :class="[p.restricted ? 'text-dark' : 'text-muted']">
+								<small class="text-truncate" :class="[p.restricted ? 'text-warning-emphasis' : 'text-muted']">
 									<samp>{{p.id}}</samp>
 								</small>
 							</span>
-							<span class="ms-auto d-flex align-items-center gap-3">
-								<span class="d-flex gap-3 align-items-center" :class="[p.restricted ? 'text-dark' : 'text-muted']">
+							<span class="ms-auto d-flex align-items-center gap-2 flex-shrink-0 flex-wrap justify-content-end">
+								<span class="d-flex gap-3 align-items-center" :class="[p.restricted ? 'text-warning-emphasis' : 'text-muted']">
 									<span class="d-flex gap-1 align-items-center text-primary">
 										<i class="bi bi-arrow-down"></i>
 										<small><strong>{{(p.cumu_receive + p.total_receive).toFixed(4)}}</strong> GB</small>
@@ -213,7 +213,7 @@ const clearDownload = () => {
 								<span v-if="p.restricted" class="badge bg-warning text-dark border border-warning-subtle">
 									<LocaleText :t="p.restricted_reason || 'Restricted'"></LocaleText>
 								</span>
-								<span v-if="downloadConfirmation">
+								<span v-if="downloadConfirmation" class="flex-shrink-0">
 									<span class="spinner-border spinner-border-sm" role="status"
 										 v-if="!downloaded.success.find(x => x === p.id) && !downloaded.failed.find(x => x === p.id)">
 									</span>

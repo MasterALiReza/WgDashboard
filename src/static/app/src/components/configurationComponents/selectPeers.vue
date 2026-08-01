@@ -200,17 +200,17 @@ const clearDownload = () => {
 								</small>
 							</span>
 							<span class="ms-auto d-flex align-items-center gap-2 flex-shrink-0 flex-wrap justify-content-end">
-								<span class="d-flex gap-3 align-items-center" :class="[p.restricted ? 'text-warning-emphasis' : 'text-muted']">
-									<span class="d-flex gap-1 align-items-center text-primary">
+								<span class="d-flex flex-column gap-1 justify-content-center" :class="[p.restricted ? 'text-warning-emphasis' : 'text-muted']">
+									<span class="d-flex gap-2 align-items-center text-primary" style="font-size: 0.8rem;">
 										<i class="bi bi-arrow-down"></i>
-										<small><strong>{{(p.cumu_receive + p.total_receive).toFixed(4)}}</strong> GB</small>
+										<span><strong>{{(p.cumu_receive + p.total_receive).toFixed(4)}}</strong> GB</span>
 									</span>
-									<span class="d-flex gap-1 align-items-center text-success">
+									<span class="d-flex gap-2 align-items-center text-success" style="font-size: 0.8rem;">
 										<i class="bi bi-arrow-up"></i>
-										<small><strong>{{(p.cumu_sent + p.total_sent).toFixed(4)}}</strong> GB</small>
+										<span><strong>{{(p.cumu_sent + p.total_sent).toFixed(4)}}</strong> GB</span>
 									</span>
 								</span>
-								<span v-if="p.restricted" class="badge bg-warning text-dark border border-warning-subtle">
+								<span v-if="p.restricted" class="badge bg-warning text-dark border border-warning-subtle fw-medium rounded-pill" style="font-size: 0.65rem; padding: 0.45em 0.7em;">
 									<LocaleText :t="p.restricted_reason || 'Restricted'"></LocaleText>
 								</span>
 								<span v-if="downloadConfirmation" class="flex-shrink-0">

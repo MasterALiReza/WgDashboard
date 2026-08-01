@@ -355,7 +355,8 @@ class WireguardConfiguration:
             f"{self.Name}_restrict_access",
             f"{self.Name}_deleted",
             f"{self.Name}_transfer",
-            f"{self.Name}_history_endpoint"
+            f"{self.Name}_history_endpoint",
+            f"{self.Name}_traffic_snapshot"
         ]
         escaped_tables = "|".join(re.escape(t) for t in allowed_tables)
         allowed_insert_pattern = re.compile(
@@ -399,11 +400,17 @@ class WireguardConfiguration:
             self.DashboardConfig.SetConfig("WireGuardConfiguration", "autostart", d)
 
     def getRestrictedPeers(self):
+        current_time = time.time()
+        if hasattr(self, '_last_restricted_peers_time') and hasattr(self, 'RestrictedPeers'):
+            if current_time - self._last_restricted_peers_time < 2:
+                return
+
         self.RestrictedPeers = []
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
             for i in restricted:
                 self.RestrictedPeers.append(Peer(i, self))
+        self._last_restricted_peers_time = current_time
 
     def configurationFileChanged(self) :
         mt = os.path.getmtime(self.configPath)
@@ -694,6 +701,7 @@ class WireguardConfiguration:
         return True, "Allow access successfully"
 
     def restrictPeers(self, listOfPublicKeys, reason=None) -> tuple[bool, str]:
+        self._force_refresh_stats()
         numOfRestrictedPeers = 0
         numOfFailedToRestrictPeers = 0
         if not self.getStatus():
@@ -743,6 +751,7 @@ class WireguardConfiguration:
 
 
     def deletePeers(self, listOfPublicKeys, AllPeerJobs: PeerJobs, AllPeerShareLinks: PeerShareLinks) -> tuple[bool, str]:
+        self._force_refresh_stats()
         numOfDeletedPeers = 0
         numOfFailedToDeletePeers = 0
         deleted = []
@@ -978,6 +987,16 @@ class WireguardConfiguration:
         except Exception as e:
             current_app.logger.error(f"Error in refreshPeersRuntimeStats for {self.Name}: {e}")
 
+    def _force_refresh_stats(self):
+        """Forces a synchronous refresh of peer stats from the kernel, bypassing the cache/debounce."""
+        try:
+            old_time = getattr(self, '_last_stats_refresh_time', 0)
+            self._last_stats_refresh_time = 0
+            self.refreshPeersRuntimeStats()
+        except Exception as e:
+            current_app.logger.error(f"Error in _force_refresh_stats for {self.Name}: {e}")
+            self._last_stats_refresh_time = old_time
+
     def getPeersLatestHandshake(self):
         self.refreshPeersRuntimeStats()
 
@@ -991,6 +1010,7 @@ class WireguardConfiguration:
         self.getStatus()
         if self.Status:
             try:
+                self._force_refresh_stats()
                 command = [f"{self.Protocol}-quick", "down", self.Name]
                 check = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=60)
 
@@ -1069,13 +1089,61 @@ class WireguardConfiguration:
         except Exception as e:
             current_app.logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
 
+    def _compute_data_usage(self) -> dict:
+        """
+        محاسبه ترافیک اینترفیس مستقیم از DB — هرگز از self.Peers استفاده نمی‌کند.
+        این متد atomic و thread-safe است چون فقط DB query می‌زند.
+        """
+        try:
+            with self.engine.connect() as conn:
+                def _sum_table(tbl):
+                    row = conn.execute(
+                        sqlalchemy.select(
+                            sqlalchemy.func.coalesce(
+                                sqlalchemy.func.sum(
+                                    sqlalchemy.func.coalesce(tbl.c.cumu_receive, 0.0) +
+                                    sqlalchemy.func.coalesce(tbl.c.total_receive, 0.0)
+                                ), 0.0
+                            ).label('recv'),
+                            sqlalchemy.func.coalesce(
+                                sqlalchemy.func.sum(
+                                    sqlalchemy.func.coalesce(tbl.c.cumu_sent, 0.0) +
+                                    sqlalchemy.func.coalesce(tbl.c.total_sent, 0.0)
+                                ), 0.0
+                            ).label('sent'),
+                            sqlalchemy.func.coalesce(
+                                sqlalchemy.func.sum(
+                                    sqlalchemy.func.coalesce(tbl.c.cumu_data, 0.0) +
+                                    sqlalchemy.func.coalesce(tbl.c.total_data, 0.0)
+                                ), 0.0
+                            ).label('total'),
+                        )
+                    ).mappings().first()
+                    return (row['recv'] or 0.0), (row['sent'] or 0.0), (row['total'] or 0.0)
+
+                a_recv, a_sent, a_total = _sum_table(self.peersTable)
+                r_recv, r_sent, r_total = _sum_table(self.peersRestrictedTable)
+
+                snap = conn.execute(
+                    self.interfaceTrafficSnapshotTable.select().where(
+                        self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
+                    )
+                ).mappings().first()
+                s_recv  = float(snap['total_receive']) if snap else 0.0
+                s_sent  = float(snap['total_sent'])    if snap else 0.0
+                s_total = float(snap['total_data'])    if snap else 0.0
+
+            return {
+                "Total":   a_total + r_total + s_total,
+                "Sent":    a_sent  + r_sent  + s_sent,
+                "Receive": a_recv  + r_recv  + s_recv,
+            }
+        except Exception as e:
+            current_app.logger.error(f"{self.Name} _compute_data_usage() Error: {e}")
+            return {"Total": 0.0, "Sent": 0.0, "Receive": 0.0}
+
     def toJson(self):
         self.Status = self.getStatus()
-        
-        snapshot = self._get_traffic_snapshot()
-        snap_total = snapshot.get('total_data', 0) if snapshot else 0
-        snap_sent = snapshot.get('total_sent', 0) if snapshot else 0
-        snap_receive = snapshot.get('total_receive', 0) if snapshot else 0
         
         return {
             "Status": self.Status,
@@ -1089,13 +1157,9 @@ class WireguardConfiguration:
             "PostUp": self.PostUp,
             "PostDown": self.PostDown,
             "SaveConfig": self.SaveConfig,
-            "DataUsage": {
-                "Total": sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_data or 0) + (x.total_data or 0), self.RestrictedPeers))) + snap_total,
-                "Sent": sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_sent or 0) + (x.total_sent or 0), self.RestrictedPeers))) + snap_sent,
-                "Receive": sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.Peers))) + sum(list(map(lambda x: (x.cumu_receive or 0) + (x.total_receive or 0), self.RestrictedPeers))) + snap_receive
-            },
-            "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))),
-            "TotalPeers": len(self.Peers),
+            "DataUsage": self._compute_data_usage(),
+            "ConnectedPeers": len(list(filter(lambda x: x.status == "running", self.Peers))) + len(list(filter(lambda x: x.status == "running", self.RestrictedPeers))),
+            "TotalPeers": len(self.Peers) + len(self.RestrictedPeers),
             "Protocol": self.Protocol,
             "Table": self.Table,
             "Info": self.configurationInfo.model_dump()
@@ -1301,6 +1365,13 @@ class WireguardConfiguration:
                 doRenameStatement("_restrict_access")
                 doRenameStatement("_deleted")
                 doRenameStatement("_transfer")
+                doRenameStatement("_traffic_snapshot")
+                conn.execute(
+                    sqlalchemy.text(
+                        f'UPDATE `{newConfigurationName}_traffic_snapshot` SET configuration_name = :new_name WHERE configuration_name = :old_name'
+                    ),
+                    {"new_name": newConfigurationName, "old_name": self.Name}
+                )
 
             self.AllPeerJobs.updateJobConfigurationName(self.Name, newConfigurationName)
             shutil.copy(

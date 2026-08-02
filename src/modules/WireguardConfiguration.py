@@ -922,12 +922,15 @@ class WireguardConfiguration:
 
                 cur_i = existing_peers.get(pubkey)
                 if cur_i is not None:
-                    total_sent = cur_i['total_sent']
-                    total_receive = cur_i['total_receive']
+                    total_sent = cur_i.get('total_sent') or 0.0
+                    total_receive = cur_i.get('total_receive') or 0.0
+                    cumu_recv = cur_i.get('cumu_receive') or 0.0
+                    cumu_sent = cur_i.get('cumu_sent') or 0.0
+
                     cur_total_sent = tx_bytes / (1024 ** 3)
                     cur_total_receive = rx_bytes / (1024 ** 3)
-                    cumulative_receive = cur_i['cumu_receive'] + total_receive
-                    cumulative_sent = cur_i['cumu_sent'] + total_sent
+                    cumulative_receive = cumu_recv + total_receive
+                    cumulative_sent = cumu_sent + total_sent
 
                     if (total_sent * 0.999) <= cur_total_sent and (total_receive * 0.999) <= cur_total_receive:
                         total_sent = cur_total_sent
@@ -939,14 +942,14 @@ class WireguardConfiguration:
                             "b_cumu_sent": cumulative_sent,
                             "b_cumu_data": cumulative_sent + cumulative_receive
                         })
-                        total_sent = 0
-                        total_receive = 0
+                        total_sent = 0.0
+                        total_receive = 0.0
                         if p is not None:
                             p.cumu_receive = cumulative_receive
                             p.cumu_sent = cumulative_sent
                             p.cumu_data = cumulative_sent + cumulative_receive
 
-                    if p and (p.total_receive != total_receive or p.total_sent != total_sent):
+                    if (cur_i.get('total_receive') or 0.0) != total_receive or (cur_i.get('total_sent') or 0.0) != total_sent:
                         total_updates.append({
                             "b_id": pubkey,
                             "b_total_receive": total_receive,

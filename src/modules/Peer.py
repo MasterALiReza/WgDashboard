@@ -25,16 +25,16 @@ class Peer:
         self.DNS = tableData["DNS"]
         self.endpoint_allowed_ip = tableData["endpoint_allowed_ip"]
         self.name = tableData["name"]
-        self.total_receive = tableData["total_receive"]
-        self.total_sent = tableData["total_sent"]
-        self.total_data = tableData["total_data"]
+        self.total_receive = tableData.get("total_receive") or 0.0
+        self.total_sent = tableData.get("total_sent") or 0.0
+        self.total_data = tableData.get("total_data") or (self.total_receive + self.total_sent)
         self.endpoint = tableData["endpoint"]
         self.status = tableData["status"]
         self.latest_handshake = tableData["latest_handshake"]
         self.allowed_ip = tableData["allowed_ip"]
-        self.cumu_receive = tableData["cumu_receive"]
-        self.cumu_sent = tableData["cumu_sent"]
-        self.cumu_data = tableData["cumu_data"]
+        self.cumu_receive = tableData.get("cumu_receive") or 0.0
+        self.cumu_sent = tableData.get("cumu_sent") or 0.0
+        self.cumu_data = tableData.get("cumu_data") or (self.cumu_receive + self.cumu_sent)
         self.mtu = tableData["mtu"]
         self.keepalive = tableData["keepalive"]
         self.notes = tableData.get("notes", "")
@@ -288,6 +288,11 @@ class Peer:
                     self.configuration.peersTable.c.id == self.id
                 )
                 row = conn.execute(stmt).mappings().fetchone()
+                if not row:
+                    stmt_res = self.configuration.peersRestrictedTable.select().where(
+                        self.configuration.peersRestrictedTable.c.id == self.id
+                    )
+                    row = conn.execute(stmt_res).mappings().fetchone()
                 if row:
                     cur_recv = row.get('total_receive') or 0
                     cur_sent = row.get('total_sent') or 0
@@ -349,13 +354,12 @@ class Peer:
                     self.cumu_sent = new_cumu_sent
                     self.cumu_receive = new_cumu_recv
                 elif mode == "receive":
-                    peer_total_receive = (self.cumu_receive or 0) + cur_recv
+                    peer_total_receive = cumu_recv + cur_recv
                     if peer_total_receive > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, 0, peer_total_receive
                         )
                     new_cumu_recv = -cur_recv
-                    cumu_sent = self.cumu_sent or 0
 
                     conn.execute(
                         self.configuration.peersTable.update().values({
@@ -382,13 +386,12 @@ class Peer:
                     self.total_data = cur_recv + cur_sent
                     self.cumu_data = new_cumu_recv + cumu_sent
                 elif mode == "sent":
-                    peer_total_sent = (self.cumu_sent or 0) + cur_sent
+                    peer_total_sent = cumu_sent + cur_sent
                     if peer_total_sent > 0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, 0, peer_total_sent, peer_total_sent
                         )
                     new_cumu_sent = -cur_sent
-                    cumu_recv = self.cumu_receive or 0
 
                     conn.execute(
                         self.configuration.peersTable.update().values({

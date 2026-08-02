@@ -157,7 +157,7 @@ class PeerJobs:
                     if f:
                         if job.Field in ["total_receive", "total_sent", "total_data"]:
                             s = job.Field.split("_")[1]
-                            x: float = getattr(fp, f"total_{s}") + getattr(fp, f"cumu_{s}")
+                            x: float = float((getattr(fp, f"total_{s}", 0.0) or 0.0) + (getattr(fp, f"cumu_{s}", 0.0) or 0.0))
                             y: float = float(job.Value)
                         else:
                             x: datetime = datetime.now()

@@ -1108,7 +1108,11 @@ class WireguardConfiguration:
         """
         محاسبه ترافیک اینترفیس مستقیم از DB — هرگز از self.Peers استفاده نمی‌کند.
         این متد atomic و thread-safe است چون فقط DB query می‌زند.
+        در صورت بروز خطای موقت DB، از نسخه قبلی ذخیره‌شده استفاده می‌کند تا ترافیک روی صفر قرار نگیرد.
         """
+        if not hasattr(self, '_last_data_usage'):
+            self._last_data_usage = {"Total": 0.0, "Sent": 0.0, "Receive": 0.0}
+
         try:
             with self.engine.connect() as conn:
                 def _sum_table(tbl):
@@ -1148,14 +1152,19 @@ class WireguardConfiguration:
                 s_sent  = float(snap['total_sent'])    if snap else 0.0
                 s_total = float(snap['total_data'])    if snap else 0.0
 
-            return {
+            res = {
                 "Total":   a_total + r_total + s_total,
                 "Sent":    a_sent  + r_sent  + s_sent,
                 "Receive": a_recv  + r_recv  + s_recv,
             }
+            if res["Total"] > 0:
+                self._last_data_usage = res
+            elif self._last_data_usage.get("Total", 0) > 0 and res["Total"] == 0:
+                return self._last_data_usage
+            return res
         except Exception as e:
             current_app.logger.error(f"{self.Name} _compute_data_usage() Error: {e}")
-            return {"Total": 0.0, "Sent": 0.0, "Receive": 0.0}
+            return getattr(self, '_last_data_usage', {"Total": 0.0, "Sent": 0.0, "Receive": 0.0})
 
     def toJson(self):
         self.Status = self.getStatus()

@@ -777,9 +777,21 @@ class WireguardConfiguration:
                     for shareLink in pf.ShareLink:
                         AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
                     try:
-                        peer_total_receive = (pf.cumu_receive or 0) + (pf.total_receive or 0)
-                        peer_total_sent    = (pf.cumu_sent or 0) + (pf.total_sent or 0)
-                        peer_total_data    = (pf.cumu_data or 0) + (pf.total_data or 0)
+                        stmt_peer = self.peersTable.select().where(self.peersTable.c.id == pf.id)
+                        db_row = conn.execute(stmt_peer).mappings().fetchone()
+                        if not db_row:
+                            stmt_restricted = self.peersRestrictedTable.select().where(self.peersRestrictedTable.c.id == pf.id)
+                            db_row = conn.execute(stmt_restricted).mappings().fetchone()
+
+                        if db_row:
+                            peer_total_receive = (db_row.get('cumu_receive') or 0.0) + (db_row.get('total_receive') or 0.0)
+                            peer_total_sent    = (db_row.get('cumu_sent') or 0.0) + (db_row.get('total_sent') or 0.0)
+                            peer_total_data    = (db_row.get('cumu_data') or 0.0) + (db_row.get('total_data') or (peer_total_receive + peer_total_sent))
+                        else:
+                            peer_total_receive = (pf.cumu_receive or 0.0) + (pf.total_receive or 0.0)
+                            peer_total_sent    = (pf.cumu_sent or 0.0) + (pf.total_sent or 0.0)
+                            peer_total_data    = (pf.cumu_data or 0.0) + (pf.total_data or 0.0)
+
                         self._add_to_traffic_snapshot(conn, peer_total_receive, peer_total_sent, peer_total_data)
                         
                         if not is_restricted:

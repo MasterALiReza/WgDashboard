@@ -70,19 +70,22 @@ watch(selectedPeers, () => {
 const route = useRoute()
 const emit = defineEmits(["refresh", "close"])
 const submitting = ref(false)
-const submitDelete = () => {
+const submitDelete = async () => {
 	submitting.value = true;
-	fetchPost(`/api/deletePeers/${route.params.id}`, {
-		peers: selectedPeers.value
-	}, (res) => {
-		dashboardStore.newMessage("Server", res.message, res.status ? "success":"danger")
-		if (res.status){
-			selectedPeers.value = []
-			deleteConfirmation.value = false
-		}
-		emit("refresh")
+	try {
+		await fetchPost(`/api/deletePeers/${route.params.id}`, {
+			peers: selectedPeers.value
+		}, (res) => {
+			dashboardStore.newMessage("Server", res.message, res.status ? "success":"danger")
+			if (res.status){
+				selectedPeers.value = []
+				deleteConfirmation.value = false
+			}
+			emit("refresh")
+		})
+	} finally {
 		submitting.value = false;
-	})
+	}
 }
 
 const downloaded = reactive({
@@ -134,12 +137,13 @@ const clearDownload = () => {
 								<LocaleText t="Select Peers"></LocaleText>
 							</h4>
 							<button type="button" class="btn-close ms-auto"
-							        @click="emit('close')"></button>
+							        :disabled="submitting"
+							        @click="!submitting && emit('close')"></button>
 						</div>
 						<div class="d-flex w-100 align-items-center gap-2">
 							<div class="d-flex gap-3">
 								<a role="button"
-								   v-if="!downloadConfirmation && selectedPeers.length !== searchPeers.map(x => x.id).length"
+								   v-if="!downloadConfirmation && !deleteConfirmation && !submitting && selectedPeers.length !== searchPeers.map(x => x.id).length"
 								   @click="selectedPeers = searchPeers.map(x => x.id)"
 								   class="text-decoration-none text-body">
 									<small>
@@ -148,7 +152,7 @@ const clearDownload = () => {
 									</small>
 								</a>
 								<a role="button"
-								   v-if="!downloadConfirmation && props.configurationPeers.some(x => x.restricted) && props.configurationPeers.filter(x => x.restricted).some(x => !selectedPeers.includes(x.id))"
+								   v-if="!downloadConfirmation && !deleteConfirmation && !submitting && props.configurationPeers.some(x => x.restricted) && props.configurationPeers.filter(x => x.restricted).some(x => !selectedPeers.includes(x.id))"
 								   @click="selectedPeers = [...new Set([...selectedPeers, ...props.configurationPeers.filter(x => x.restricted).map(x => x.id)])]"
 								   class="text-decoration-none text-body">
 									<small>
@@ -158,7 +162,7 @@ const clearDownload = () => {
 								</a>
 								<a role="button" class="text-decoration-none text-body"
 								   @click="selectedPeers = []"
-								   v-if="selectedPeers.length > 0 && !downloadConfirmation">
+								   v-if="selectedPeers.length > 0 && !downloadConfirmation && !deleteConfirmation && !submitting">
 									<small>
 										<i class="bi bi-x-circle-fill me-2"></i>
 										<LocaleText t="Clear Selection"></LocaleText>
@@ -171,6 +175,7 @@ const clearDownload = () => {
 							</label>
 							<input class="form-control form-control-sm rounded-3"
 							       v-model="selectPeersSearchInput"
+							       :disabled="deleteConfirmation || downloadConfirmation || submitting"
 							       id="selectPeersSearchInput"
 							       style="width: 200px !important;" type="text">
 						</div>
@@ -182,7 +187,7 @@ const clearDownload = () => {
 						        @click="togglePeers(p.id)"
 						        :class="[{active: selectedPeers.find(x => x === p.id)}, p.restricted ? 'border-warning bg-warning-subtle text-warning-emphasis' : '']"
 						        :key="p.id"
-						        :disabled="deleteConfirmation || downloadConfirmation"
+						        :disabled="deleteConfirmation || downloadConfirmation || submitting"
 						        ref="sp"
 						        :data-id="p.id"
 						        v-for="p in searchPeers">
@@ -260,21 +265,31 @@ const clearDownload = () => {
 							</template>
 						</template>
 						<template v-else-if="deleteConfirmation">
-							<button class="btn btn-danger rounded-3"
-							        :disabled="selectedPeers.length === 0 || submitting"
-							        @click="submitDelete()"
-							>
-								<LocaleText t="Yes"></LocaleText>
-							</button>
-							<strong v-if="selectedPeers.length > 0" class="flex-grow-1 text-center">
-								<LocaleText t="Are you sure to delete"></LocaleText> <LocaleText :t="selectedPeers.length + ' Peer' + (selectedPeers.length > 1 ? 's':'')"></LocaleText>?
-							</strong>
-							<button class="btn bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle ms-auto rounded-3"
-							        :disabled="selectedPeers.length === 0 || submitting"
-							        @click="deleteConfirmation = false"
-							>
-								<LocaleText t="No"></LocaleText>
-							</button>
+							<template v-if="submitting">
+								<div class="d-flex align-items-center justify-content-center flex-grow-1 gap-2 py-1 text-danger">
+									<span class="spinner-border spinner-border-sm" role="status"></span>
+									<strong>
+										<LocaleText t="Deleting" /> <LocaleText :t="selectedPeers.length + ' Peer' + (selectedPeers.length > 1 ? 's':'')"></LocaleText>...
+									</strong>
+								</div>
+							</template>
+							<template v-else>
+								<button class="btn btn-danger rounded-3"
+								        :disabled="selectedPeers.length === 0 || submitting"
+								        @click="submitDelete()"
+								>
+									<LocaleText t="Yes"></LocaleText>
+								</button>
+								<strong v-if="selectedPeers.length > 0" class="flex-grow-1 text-center">
+									<LocaleText t="Are you sure to delete"></LocaleText> <LocaleText :t="selectedPeers.length + ' Peer' + (selectedPeers.length > 1 ? 's':'')"></LocaleText>?
+								</strong>
+								<button class="btn bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle ms-auto rounded-3"
+								        :disabled="selectedPeers.length === 0 || submitting"
+								        @click="deleteConfirmation = false"
+								>
+									<LocaleText t="No"></LocaleText>
+								</button>
+							</template>
 						</template>
 					</div>
 				</div>

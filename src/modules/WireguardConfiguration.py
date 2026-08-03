@@ -752,68 +752,88 @@ class WireguardConfiguration:
 
     def deletePeers(self, listOfPublicKeys, AllPeerJobs: PeerJobs, AllPeerShareLinks: PeerShareLinks) -> tuple[bool, str]:
         self._force_refresh_stats()
-        numOfDeletedPeers = 0
-        numOfFailedToDeletePeers = 0
-        deleted = []
         if not self.getStatus():
             try:
                 self.toggleConfiguration()
             except Exception:
                 pass
+
+        # Gather peers to delete first (avoiding nested DB connections during transaction)
+        peers_to_delete = []
+        for p in listOfPublicKeys:
+            found, pf = self.searchPeer(p)
+            is_restricted = False
+            if not found:
+                for restricted_peer in self.RestrictedPeers:
+                    if restricted_peer.id == p:
+                        found = True
+                        pf = restricted_peer
+                        is_restricted = True
+                        break
+            if found:
+                peers_to_delete.append((pf, is_restricted))
+
+        if not peers_to_delete:
+            return False, "No peer(s) to delete found"
+
+        # Step 1: Remove peers from WireGuard interface and clear external jobs outside DB transaction
+        for pf, is_restricted in peers_to_delete:
+            for job in getattr(pf, 'jobs', []):
+                try:
+                    AllPeerJobs.deleteJob(job)
+                except Exception:
+                    pass
+            for shareLink in getattr(pf, 'ShareLink', []):
+                try:
+                    AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
+                except Exception:
+                    pass
+
+            if not is_restricted:
+                try:
+                    command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
+                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                except Exception:
+                    pass
+
+        # Step 2: Execute SQLite database deletions cleanly inside a brief transaction
+        numOfDeletedPeers = 0
+        numOfFailedToDeletePeers = 0
+        deleted = []
         with self.engine.begin() as conn:
-            for p in listOfPublicKeys:
-                found, pf = self.searchPeer(p)
-                is_restricted = False
-                if not found:
-                    for restricted_peer in self.RestrictedPeers:
-                        if restricted_peer.id == p:
-                            found = True
-                            pf = restricted_peer
-                            is_restricted = True
-                            break
-                if found:
-                    for job in pf.jobs:
-                        AllPeerJobs.deleteJob(job)
-                    for shareLink in pf.ShareLink:
-                        AllPeerShareLinks.updateLinkExpireDate(shareLink.ShareID, datetime.now())
-                    try:
-                        stmt_peer = self.peersTable.select().where(self.peersTable.c.id == pf.id)
-                        db_row = conn.execute(stmt_peer).mappings().fetchone()
-                        if not db_row:
-                            stmt_restricted = self.peersRestrictedTable.select().where(self.peersRestrictedTable.c.id == pf.id)
-                            db_row = conn.execute(stmt_restricted).mappings().fetchone()
+            for pf, is_restricted in peers_to_delete:
+                try:
+                    stmt_peer = self.peersTable.select().where(self.peersTable.c.id == pf.id)
+                    db_row = conn.execute(stmt_peer).mappings().fetchone()
+                    if not db_row:
+                        stmt_restricted = self.peersRestrictedTable.select().where(self.peersRestrictedTable.c.id == pf.id)
+                        db_row = conn.execute(stmt_restricted).mappings().fetchone()
 
-                        if db_row:
-                            peer_total_receive = (db_row.get('cumu_receive') or 0.0) + (db_row.get('total_receive') or 0.0)
-                            peer_total_sent    = (db_row.get('cumu_sent') or 0.0) + (db_row.get('total_sent') or 0.0)
-                            peer_total_data    = (db_row.get('cumu_data') or 0.0) + (db_row.get('total_data') or (peer_total_receive + peer_total_sent))
-                        else:
-                            peer_total_receive = (pf.cumu_receive or 0.0) + (pf.total_receive or 0.0)
-                            peer_total_sent    = (pf.cumu_sent or 0.0) + (pf.total_sent or 0.0)
-                            peer_total_data    = (pf.cumu_data or 0.0) + (pf.total_data or 0.0)
+                    if db_row:
+                        peer_total_receive = (db_row.get('cumu_receive') or 0.0) + (db_row.get('total_receive') or 0.0)
+                        peer_total_sent    = (db_row.get('cumu_sent') or 0.0) + (db_row.get('total_sent') or 0.0)
+                        peer_total_data    = (db_row.get('cumu_data') or 0.0) + (db_row.get('total_data') or (peer_total_receive + peer_total_sent))
+                    else:
+                        peer_total_receive = (getattr(pf, 'cumu_receive', 0.0) or 0.0) + (getattr(pf, 'total_receive', 0.0) or 0.0)
+                        peer_total_sent    = (getattr(pf, 'cumu_sent', 0.0) or 0.0) + (getattr(pf, 'total_sent', 0.0) or 0.0)
+                        peer_total_data    = (getattr(pf, 'cumu_data', 0.0) or 0.0) + (getattr(pf, 'total_data', 0.0) or 0.0)
 
-                        self._add_to_traffic_snapshot(conn, peer_total_receive, peer_total_sent, peer_total_data)
-                        
-                        if not is_restricted:
-                            try:
-                                command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
-                                subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
-                            except Exception:
-                                pass
-                        conn.execute(
-                            self.peersTable.delete().where(
-                                self.peersTable.columns.id == pf.id
-                            )
+                    self._add_to_traffic_snapshot(conn, peer_total_receive, peer_total_sent, peer_total_data)
+                    
+                    conn.execute(
+                        self.peersTable.delete().where(
+                            self.peersTable.columns.id == pf.id
                         )
-                        conn.execute(
-                            self.peersRestrictedTable.delete().where(
-                                self.peersRestrictedTable.columns.id == pf.id
-                            )
+                    )
+                    conn.execute(
+                        self.peersRestrictedTable.delete().where(
+                            self.peersRestrictedTable.columns.id == pf.id
                         )
-                        deleted.append(pf.id)
-                        numOfDeletedPeers += 1
-                    except Exception as e:
-                        numOfFailedToDeletePeers += 1
+                    )
+                    deleted.append(pf.id)
+                    numOfDeletedPeers += 1
+                except Exception as e:
+                    numOfFailedToDeletePeers += 1
 
         if not self.__wgSave():
             return False, "Failed to save configuration through WireGuard"

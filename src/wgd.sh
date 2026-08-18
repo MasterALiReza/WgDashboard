@@ -440,6 +440,7 @@ gunicorn_start () {
   if [[ $USER == root ]]; then
     export PATH=$PATH:/usr/local/bin:$HOME/.local/bin
   fi
+  ulimit -n 65535 2>/dev/null || true
   _check_and_set_venv
   sudo "$venv_gunicorn" --config ./gunicorn.conf.py dashboard:app
   sleep 5
@@ -462,7 +463,7 @@ gunicorn_stop () {
 		sudo kill "$pid" 2>/dev/null || true
 		
 		local count=0
-		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 25 ]; do
+		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 15 ]; do
 			printf "."
 			sleep 1
 			count=$((count+1))
@@ -470,7 +471,9 @@ gunicorn_stop () {
 		
 		if kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ]; then
 		    printf "\n[WGDashboard] Force killing Gunicorn (timeout reached)\n"
+		    pkill -9 -P "$pid" 2>/dev/null || true
 		    sudo kill -9 "$pid" 2>/dev/null || true
+		    pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
 		    sudo rm -f "$PID_FILE"
 		fi
 		

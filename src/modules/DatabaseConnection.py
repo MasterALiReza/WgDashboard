@@ -6,11 +6,9 @@ from sqlalchemy.engine import Engine
 
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
-    # Enable WAL mode for SQLite to dramatically improve concurrency and prevent 'database is locked' errors.
-    # Check if the connection is a sqlite connection by inspecting its class name or type
+    # Set connection-level pragmas for concurrency and performance
     if dbapi_connection.__class__.__module__ == "sqlite3":
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()

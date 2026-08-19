@@ -128,13 +128,62 @@ def peerJobScheduleBackgroundThread():
                 app.logger.error(f"Background Thread #2 Error: {e}")
             time.sleep(180)
 
+def autoPruneDatabaseLogs():
+    """
+    Periodically trims bloated log tables (DashboardLog, JobLog) and vacua SQLite databases.
+    Prevents SQLite databases from growing indefinitely and avoids performance bottlenecks.
+    """
+    try:
+        from sqlalchemy import create_engine, text
+        import glob
+        from modules.DatabaseConnection import ConnectionString
+        
+        # 1. Prune SQL Log database
+        engine = create_engine(ConnectionString("wgdashboard_log"))
+        with engine.connect() as conn:
+            # Keep latest 20,000 DashboardLog rows
+            conn.execute(text("""
+                DELETE FROM "DashboardLog" 
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM "DashboardLog" ORDER BY rowid DESC LIMIT 20000
+                )
+            """))
+            # Keep latest 5,000 JobLog rows
+            conn.execute(text("""
+                DELETE FROM "JobLog" 
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM "JobLog" ORDER BY rowid DESC LIMIT 5000
+                )
+            """))
+            conn.commit()
+            
+            # Checkpoint WAL and optimize SQLite
+            if engine.dialect.name == "sqlite":
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                conn.commit()
+
+        # 2. Prune old text log files (keep 7 days)
+        log_dir = os.path.abspath("./log")
+        if os.path.exists(log_dir):
+            cutoff = time.time() - (7 * 86400)
+            for f in glob.glob(os.path.join(log_dir, "*.log")):
+                try:
+                    if os.path.getmtime(f) < cutoff:
+                        os.remove(f)
+                except Exception:
+                    pass
+        app.logger.info("[WGDashboard] Completed scheduled database and log pruning.")
+    except Exception as e:
+        app.logger.warning(f"[WGDashboard] Auto log pruning warning: {e}")
+
 def globalBackupBackgroundThread():
     with app.app_context():
-        app.logger.info("Background Thread #3 Started (Global Backup)")
+        app.logger.info("Background Thread #3 Started (Global Backup & Maintenance)")
         app.logger.info("Background Thread #3 PID:" + str(threading.get_native_id()))
         
         # Initialize last_backup_time from existing backups if possible
         last_backup_time = datetime.fromtimestamp(0)
+        last_prune_time = datetime.now() - timedelta(hours=5, minutes=50) # Run first prune ~10 mins after boot
         backups = GlobalBackupManager.list_global_backups()
         for b in backups:
             if b['label'].startswith("Auto_"):
@@ -146,11 +195,17 @@ def globalBackupBackgroundThread():
 
         while True:
             try:
+                now = datetime.now()
+
+                # Periodic Database & Log Pruning (Every 6 hours)
+                if (now - last_prune_time).total_seconds() >= 6 * 3600:
+                    autoPruneDatabaseLogs()
+                    last_prune_time = now
+
                 auto_backup_status, auto_backup = DashboardConfig.GetConfig("GlobalBackup", "auto_backup")
                 if auto_backup_status and auto_backup:
                     schedule_status, schedule = DashboardConfig.GetConfig("GlobalBackup", "auto_backup_schedule")
                     if schedule_status and schedule:
-                        now = datetime.now()
                         time_diff = now - last_backup_time
                         should_backup = False
                         

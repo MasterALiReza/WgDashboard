@@ -141,18 +141,18 @@ def autoPruneDatabaseLogs():
         # 1. Prune SQL Log database
         engine = create_engine(ConnectionString("wgdashboard_log"))
         with engine.connect() as conn:
-            # Keep latest 20,000 DashboardLog rows
+            # Keep latest 5,000 DashboardLog rows (optimal for performance and audit history)
             conn.execute(text("""
                 DELETE FROM "DashboardLog" 
                 WHERE rowid NOT IN (
-                    SELECT rowid FROM "DashboardLog" ORDER BY rowid DESC LIMIT 20000
+                    SELECT rowid FROM "DashboardLog" ORDER BY rowid DESC LIMIT 5000
                 )
             """))
-            # Keep latest 5,000 JobLog rows
+            # Keep latest 1,000 JobLog rows
             conn.execute(text("""
                 DELETE FROM "JobLog" 
                 WHERE rowid NOT IN (
-                    SELECT rowid FROM "JobLog" ORDER BY rowid DESC LIMIT 5000
+                    SELECT rowid FROM "JobLog" ORDER BY rowid DESC LIMIT 1000
                 )
             """))
             conn.commit()
@@ -162,10 +162,10 @@ def autoPruneDatabaseLogs():
                 conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
                 conn.commit()
 
-        # 2. Prune old text log files (keep 7 days)
+        # 2. Prune old text log files (keep 3 days)
         log_dir = os.path.abspath("./log")
         if os.path.exists(log_dir):
-            cutoff = time.time() - (7 * 86400)
+            cutoff = time.time() - (3 * 86400)
             for f in glob.glob(os.path.join(log_dir, "*.log")):
                 try:
                     if os.path.getmtime(f) < cutoff:
@@ -373,8 +373,8 @@ def auth_req():
         if apiKey is not None and len(apiKey) > 0 and apiKeyEnabled:
             apiKeyExist = len(list(filter(lambda x : x.Key == apiKey, DashboardConfig.DashboardAPIKeys))) == 1
             masked_key = apiKey[:4] + "****" + apiKey[-4:] if len(apiKey) > 8 else "****"
-            DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"API Key Access: {('true' if apiKeyExist else 'false')} - Key: {masked_key}")
             if not apiKeyExist:
+                DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"Unauthorized API Key attempt: {masked_key}")
                 DashboardConfig.APIAccessed = False
                 response = Flask.make_response(app, {
                     "status": False,
@@ -384,6 +384,11 @@ def auth_req():
                 response.content_type = "application/json"
                 response.status_code = 401
                 return response
+            
+            # For valid API keys: only log mutating actions (POST/PUT/DELETE/PATCH),
+            # preventing millions of noisy log rows from continuous background GET polling.
+            if request.method.upper() not in ('GET', 'HEAD', 'OPTIONS'):
+                DashboardLogger.log(str(request.url), str(request.remote_addr), Status="true", Message=f"API Action: {request.method} {request.path} - Key: {masked_key}")
             DashboardConfig.APIAccessed = True
         else:
             DashboardConfig.APIAccessed = False

@@ -45,12 +45,15 @@ class PeerJobs:
                     job['JobID'], job['Configuration'], job['Peer'], job['Field'], job['Operator'], job['Value'],
                     job['CreationDate'], job['ExpireDate'], job['Action']))
 
-    def getAllJobs(self, configuration: str = None):
+    def getAllJobs(self, configuration: str = None, active_only: bool = False):
         if configuration is not None:
             with self.engine.connect() as conn:
-                jobs = conn.execute(self.peerJobTable.select().where(
+                stmt = self.peerJobTable.select().where(
                     self.peerJobTable.columns.Configuration == configuration
-                )).mappings().fetchall()
+                )
+                if active_only:
+                    stmt = stmt.where(self.peerJobTable.columns.ExpireDate.is_(None))
+                jobs = conn.execute(stmt).mappings().fetchall()
                 j = []
                 for job in jobs:
                     j.append(PeerJob(

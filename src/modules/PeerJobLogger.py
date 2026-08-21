@@ -47,16 +47,24 @@ class PeerJobLogger:
     def getLogs(self, configName = None) -> list[Log]:
         logs: list[Log] = []
         try:
-            allJobs = self.AllPeerJobs.getAllJobs(configName)
+            allJobs = self.AllPeerJobs.getAllJobs(configName, active_only=True)
+            if not allJobs:
+                allJobs = self.AllPeerJobs.getAllJobs(configName)
             allJobsID = [x.JobID for x in allJobs]
+            if not allJobsID:
+                return logs
+
+            # Limit the IN clause to avoid SQLite expression limits and excessive memory
+            allJobsID = allJobsID[:500]
             stmt = self.jobLogTable.select().where(self.jobLogTable.columns.JobID.in_(
                 allJobsID
-            ))
+            )).order_by(self.jobLogTable.columns.LogDate.desc()).limit(500)
             with self.engine.connect() as conn:
                 table = conn.execute(stmt).fetchall()
                 for l in table:
+                    log_date_str = l.LogDate.strftime("%Y-%m-%d %H:%M:%S") if hasattr(l.LogDate, 'strftime') else str(l.LogDate)
                     logs.append(
-                        Log(l.LogID, l.JobID, l.LogDate.strftime("%Y-%m-%d %H:%M:%S"), l.Status, l.Message))
+                        Log(l.LogID, l.JobID, log_date_str, l.Status, l.Message))
         except Exception as e:
             current_app.logger.error(f"Getting Peer Job Log Error: {e}")
             return logs

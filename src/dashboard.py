@@ -130,7 +130,7 @@ def peerJobScheduleBackgroundThread():
 
 def autoPruneDatabaseLogs():
     """
-    Periodically trims bloated log tables (DashboardLog, JobLog) and vacua SQLite databases.
+    Periodically trims bloated log tables (DashboardLog, JobLog), expired PeerJobs, and checkpoints SQLite databases.
     Prevents SQLite databases from growing indefinitely and avoids performance bottlenecks.
     """
     try:
@@ -139,9 +139,9 @@ def autoPruneDatabaseLogs():
         from modules.DatabaseConnection import ConnectionString
         
         # 1. Prune SQL Log database
-        engine = create_engine(ConnectionString("wgdashboard_log"))
-        with engine.connect() as conn:
-            # Keep latest 5,000 DashboardLog rows (optimal for performance and audit history)
+        log_engine = create_engine(ConnectionString("wgdashboard_log"))
+        with log_engine.connect() as conn:
+            # Keep latest 5,000 DashboardLog rows
             conn.execute(text("""
                 DELETE FROM "DashboardLog" 
                 WHERE rowid NOT IN (
@@ -157,12 +157,31 @@ def autoPruneDatabaseLogs():
             """))
             conn.commit()
             
-            # Checkpoint WAL and optimize SQLite
-            if engine.dialect.name == "sqlite":
+            if log_engine.dialect.name == "sqlite":
                 conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
                 conn.commit()
 
-        # 2. Prune old text log files (keep 3 days)
+        # 2. Prune expired PeerJobs (older than 14 days) and checkpoint wgdashboard_job
+        job_engine = create_engine(ConnectionString("wgdashboard_job"))
+        with job_engine.connect() as conn:
+            conn.execute(text("""
+                DELETE FROM "PeerJobs" 
+                WHERE "ExpireDate" IS NOT NULL 
+                AND "ExpireDate" < datetime('now', '-14 days')
+            """))
+            conn.commit()
+            if job_engine.dialect.name == "sqlite":
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                conn.commit()
+
+        # 3. Checkpoint main wgdashboard.db
+        main_engine = create_engine(ConnectionString("wgdashboard"))
+        with main_engine.connect() as conn:
+            if main_engine.dialect.name == "sqlite":
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                conn.commit()
+
+        # 4. Prune old text log files (keep 3 days)
         log_dir = os.path.abspath("./log")
         if os.path.exists(log_dir):
             cutoff = time.time() - (3 * 86400)

@@ -399,17 +399,18 @@ class WireguardConfiguration:
             d.remove(self.Name)
             self.DashboardConfig.SetConfig("WireGuardConfiguration", "autostart", d)
 
-    def getRestrictedPeers(self):
+    def getRestrictedPeers(self, force: bool = False):
         current_time = time.time()
-        if hasattr(self, '_last_restricted_peers_time') and hasattr(self, 'RestrictedPeers'):
-            if current_time - self._last_restricted_peers_time < 2:
+        if not force and hasattr(self, '_last_restricted_peers_time') and hasattr(self, 'RestrictedPeers') and self.RestrictedPeers is not None:
+            if current_time - self._last_restricted_peers_time < 10:
                 return
 
-        self.RestrictedPeers = []
+        new_restricted = []
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
             for i in restricted:
-                self.RestrictedPeers.append(Peer(i, self))
+                new_restricted.append(Peer(i, self))
+        self.RestrictedPeers = new_restricted
         self._last_restricted_peers_time = current_time
 
     def configurationFileChanged(self) :
@@ -719,7 +720,7 @@ class WireguardConfiguration:
         if not self.__wgSave():
             return False, "Failed to save configuration through WireGuard"
         self.getPeers()
-        self.getRestrictedPeers()
+        self.getRestrictedPeers(force=True)
         if failed_count == 0:
             return True, "Allow access successfully"
         return len(successfully_applied_keys) > 0, f"Allowed {len(successfully_applied_keys)} peer(s), {failed_count} failed."
@@ -786,7 +787,7 @@ class WireguardConfiguration:
 
         if not self.__wgSave():
             return False, "Failed to save configuration through WireGuard"
-        self.getRestrictedPeers()
+        self.getRestrictedPeers(force=True)
         self.getPeers()
         if numOfRestrictedPeers == len(listOfPublicKeys):
             return True, f"Restricted {numOfRestrictedPeers} peer(s)"
@@ -882,7 +883,7 @@ class WireguardConfiguration:
             return False, "Failed to save configuration through WireGuard"
 
         self.getPeers()
-        self.getRestrictedPeers()
+        self.getRestrictedPeers(force=True)
         
         if numOfDeletedPeers == 0 and numOfFailedToDeletePeers == 0:
             return False, "No peer(s) to delete found"

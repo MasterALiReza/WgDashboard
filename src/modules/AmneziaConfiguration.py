@@ -313,9 +313,17 @@ class AmneziaConfiguration(WireguardConfiguration):
             return False, [], "Internal server error"
         return True, result['peers'], ""
 
-    def getRestrictedPeers(self):
-        self.RestrictedPeers = []
+    def getRestrictedPeers(self, force: bool = False):
+        import time
+        current_time = time.time()
+        if not force and hasattr(self, '_last_restricted_peers_time') and hasattr(self, 'RestrictedPeers') and self.RestrictedPeers is not None:
+            if current_time - self._last_restricted_peers_time < 10:
+                return
+
+        new_restricted = []
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
             for i in restricted:
-                self.RestrictedPeers.append(AmneziaPeer(i, self))
+                new_restricted.append(AmneziaPeer(i, self))
+        self.RestrictedPeers = new_restricted
+        self._last_restricted_peers_time = current_time

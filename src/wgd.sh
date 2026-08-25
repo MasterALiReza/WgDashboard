@@ -393,39 +393,20 @@ install_wgd(){
     printf "[WGDashboard] Enter ./wgd.sh start to start the dashboard\n"
 }
 
-_is_systemd_managed() {
-  if [ -n "$INVOCATION_ID" ] || [ -n "$WGD_SYSTEMD_CALLED" ]; then
-    return 1
-  fi
-  if [ -f "/etc/systemd/system/wg-dashboard.service" ] || [ -f "/lib/systemd/system/wg-dashboard.service" ] || [ -f "/usr/lib/systemd/system/wg-dashboard.service" ]; then
-    if systemctl list-unit-files wg-dashboard.service 2>/dev/null | grep -E 'wg-dashboard\.service[[:space:]]+(enabled|static|disabled)' >/dev/null 2>&1; then
+check_wgd_status(){
+  if test -f "$PID_FILE"; then
+    local pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       return 0
     fi
+  fi
+  if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
+    return 0
+  fi
+  if fuser 10086/tcp > /dev/null 2>&1; then
+    return 0
   fi
   return 1
-}
-
-check_wgd_status(){
-  if _is_systemd_managed; then
-    if systemctl is-active --quiet wg-dashboard; then
-      return 0
-    else
-      return 1
-    fi
-  fi
-  if test -f "$PID_FILE"; then
-    if ps aux | grep -v grep | grep $(cat ./gunicorn.pid)  > /dev/null; then
-    return 0
-    else
-      return 1
-    fi
-  else
-    if ps aux | grep -v grep | grep '[p]ython3 '$app_name > /dev/null; then
-      return 0
-    else
-      return 1
-    fi
-  fi
 }
 
 certbot_create_ssl () {
@@ -445,23 +426,22 @@ gunicorn_start () {
   ulimit -n 65535 2>/dev/null || true
   
   # Ensure no orphaned gunicorn process is holding the port before starting
-  if [ ! -f "$PID_FILE" ]; then
-    pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
-    fuser -k 10086/tcp 2>/dev/null || true
-  fi
+  pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+  fuser -k 10086/tcp 2>/dev/null || true
+  rm -f "$PID_FILE"
 
   _check_and_set_venv
   sudo "$venv_gunicorn" --config ./gunicorn.conf.py dashboard:app
-  sleep 5
+  sleep 3
   checkPIDExist=0
   local wait_count=0
   while [ $checkPIDExist -eq 0 ] && [ $wait_count -lt 15 ]
   do
-  		if test -f './gunicorn.pid'; then
+  		if test -f "$PID_FILE" && kill -0 $(cat "$PID_FILE" 2>/dev/null) 2>/dev/null; then
   			checkPIDExist=1
   			printf "[WGDashboard] Checking if WGDashboard w/ Gunicorn started successfully\n"
   		fi
-  		sleep 2
+  		sleep 1
   		wait_count=$((wait_count+1))
   done
   if [ $checkPIDExist -eq 1 ]; then
@@ -472,35 +452,44 @@ gunicorn_start () {
 }
 
 gunicorn_stop () {
+	local pid=""
 	if test -f "$PID_FILE"; then
-		local pid=$(cat ./gunicorn.pid)
+		pid=$(cat "$PID_FILE" 2>/dev/null)
+	fi
+	if [ -z "$pid" ]; then
+		pid=$(pgrep -f "gunicorn.*dashboard:app" 2>/dev/null | head -n 1)
+	fi
+
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 		printf "[WGDashboard] Stopping WGDashboard w/ Gunicorn on PID %s" "$pid"
 		pkill -P "$pid" 2>/dev/null || true
 		sudo kill "$pid" 2>/dev/null || true
 		
 		local count=0
-		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 15 ]; do
+		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 10 ]; do
 			printf "."
 			sleep 1
 			count=$((count+1))
 		done
 		
 		if kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ]; then
-		    printf "\n[WGDashboard] Force killing Gunicorn (timeout reached)\n"
+		    printf "\n[WGDashboard] Force killing Gunicorn...\n"
 		    pkill -9 -P "$pid" 2>/dev/null || true
 		    sudo kill -9 "$pid" 2>/dev/null || true
 		fi
-		pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
-		fuser -k 10086/tcp 2>/dev/null || true
-		sudo rm -f "$PID_FILE"
-		
-		sleep 1
-		printf "\n[WGDashboard] WGDashboard is stopped.\n"
-	else
-		pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
-		fuser -k 10086/tcp 2>/dev/null || true
-		printf "[WGDashboard] WGDashboard is not running.\n"
 	fi
+
+	# Stop systemd service if running to prevent conflicting auto-restart
+	if command -v systemctl >/dev/null 2>&1 && [ -z "$INVOCATION_ID" ]; then
+		sudo systemctl stop wg-dashboard 2>/dev/null || true
+	fi
+
+	pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+	fuser -k 10086/tcp 2>/dev/null || true
+	sudo rm -f "$PID_FILE"
+	
+	sleep 1
+	printf "\n[WGDashboard] WGDashboard is stopped.\n"
 }
 
 install_service () {
@@ -537,34 +526,11 @@ EOF
 
 start_wgd () {
 	_checkWireguard
-	if _is_systemd_managed; then
-		export WGD_SYSTEMD_CALLED=1
-		printf "[WGDashboard] Managed by systemd. Starting wg-dashboard.service...\n"
-		sudo systemctl start wg-dashboard
-		sleep 2
-		if systemctl is-active --quiet wg-dashboard; then
-			printf "[WGDashboard] WGDashboard service started successfully.\n"
-		else
-			printf "[WGDashboard] Failed to start WGDashboard service.\n"
-		fi
-	else
-		gunicorn_start
-	fi
+	gunicorn_start
 }
 
 stop_wgd() {
-	if _is_systemd_managed; then
-		export WGD_SYSTEMD_CALLED=1
-		printf "[WGDashboard] Managed by systemd. Stopping wg-dashboard.service...\n"
-		sudo systemctl stop wg-dashboard
-		printf "[WGDashboard] WGDashboard service stopped successfully.\n"
-	elif test -f "$PID_FILE"; then
-		gunicorn_stop
-	else
-		kill "$(ps aux | grep "[p]ython3 $app_name" | awk '{print $2}')" 2>/dev/null || true
-		pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
-		fuser -k 10086/tcp 2>/dev/null || true
-	fi
+	gunicorn_stop
 }
 
 start_wgd_debug() {

@@ -238,7 +238,7 @@ class WireguardConfiguration:
             self.Status = self.getStatus()
 
     def __dropDatabase(self):
-        existingTables = [self.Name, f'{self.Name}_restrict_access', f'{self.Name}_transfer', f'{self.Name}_deleted', f'{self.Name}_traffic_snapshot']
+        existingTables = [self.Name, f'{self.Name}_restrict_access', f'{self.Name}_transfer', f'{self.Name}_deleted', f'{self.Name}_history_endpoint', f'{self.Name}_traffic_snapshot']
         try:
             with self.engine.begin() as conn:
                 for t in existingTables:
@@ -840,11 +840,17 @@ class WireguardConfiguration:
                 except Exception:
                     pass
 
-        # Step 2: Execute SQLite database deletions cleanly inside a brief transaction
+        # Step 2: Calculate total traffic of all peers to be deleted and execute SQLite deletions cleanly inside a single transaction
         numOfDeletedPeers = 0
         numOfFailedToDeletePeers = 0
         deleted = []
         with self.engine.begin() as conn:
+            # Batch traffic summation across all deleted peers
+            batch_recv = 0.0
+            batch_sent = 0.0
+            batch_data = 0.0
+            valid_delete_ids = []
+
             for pf, is_restricted in peers_to_delete:
                 try:
                     stmt_peer = self.peersTable.select().where(self.peersTable.c.id == pf.id)
@@ -854,29 +860,43 @@ class WireguardConfiguration:
                         db_row = conn.execute(stmt_restricted).mappings().fetchone()
 
                     if db_row:
-                        peer_total_receive = (db_row.get('cumu_receive') or 0.0) + (db_row.get('total_receive') or 0.0)
-                        peer_total_sent    = (db_row.get('cumu_sent') or 0.0) + (db_row.get('total_sent') or 0.0)
-                        peer_total_data    = (db_row.get('cumu_data') or 0.0) + (db_row.get('total_data') or (peer_total_receive + peer_total_sent))
+                        peer_total_receive = float(db_row.get('cumu_receive') or 0.0) + float(db_row.get('total_receive') or 0.0)
+                        peer_total_sent    = float(db_row.get('cumu_sent') or 0.0) + float(db_row.get('total_sent') or 0.0)
+                        peer_total_data    = float(db_row.get('cumu_data') or 0.0) + float(db_row.get('total_data') or (peer_total_receive + peer_total_sent))
                     else:
-                        peer_total_receive = (getattr(pf, 'cumu_receive', 0.0) or 0.0) + (getattr(pf, 'total_receive', 0.0) or 0.0)
-                        peer_total_sent    = (getattr(pf, 'cumu_sent', 0.0) or 0.0) + (getattr(pf, 'total_sent', 0.0) or 0.0)
-                        peer_total_data    = (getattr(pf, 'cumu_data', 0.0) or 0.0) + (getattr(pf, 'total_data', 0.0) or 0.0)
+                        peer_total_receive = float(getattr(pf, 'cumu_receive', 0.0) or 0.0) + float(getattr(pf, 'total_receive', 0.0) or 0.0)
+                        peer_total_sent    = float(getattr(pf, 'cumu_sent', 0.0) or 0.0) + float(getattr(pf, 'total_sent', 0.0) or 0.0)
+                        peer_total_data    = float(getattr(pf, 'cumu_data', 0.0) or 0.0) + float(getattr(pf, 'total_data', 0.0) or 0.0)
 
-                    self._add_to_traffic_snapshot(conn, peer_total_receive, peer_total_sent, peer_total_data)
-                    
+                    batch_recv += peer_total_receive
+                    batch_sent += peer_total_sent
+                    batch_data += peer_total_data
+                    valid_delete_ids.append(pf.id)
+                except Exception as e:
+                    current_app.logger.error(f"Error calculating stats for deleting peer {pf.id}: {e}")
+                    numOfFailedToDeletePeers += 1
+
+            # Atomic snapshot update once for the entire batch
+            if batch_data > 0.0 or batch_recv > 0.0 or batch_sent > 0.0:
+                self._add_to_traffic_snapshot(conn, batch_recv, batch_sent, batch_data)
+
+            # Bulk delete valid peer rows from tables
+            for peer_id in valid_delete_ids:
+                try:
                     conn.execute(
                         self.peersTable.delete().where(
-                            self.peersTable.columns.id == pf.id
+                            self.peersTable.columns.id == peer_id
                         )
                     )
                     conn.execute(
                         self.peersRestrictedTable.delete().where(
-                            self.peersRestrictedTable.columns.id == pf.id
+                            self.peersRestrictedTable.columns.id == peer_id
                         )
                     )
-                    deleted.append(pf.id)
+                    deleted.append(peer_id)
                     numOfDeletedPeers += 1
                 except Exception as e:
+                    current_app.logger.error(f"Error executing DB deletion for peer {peer_id}: {e}")
                     numOfFailedToDeletePeers += 1
 
         if not self.__wgSave():
@@ -1138,6 +1158,12 @@ class WireguardConfiguration:
 
     def _add_to_traffic_snapshot(self, conn, recv, sent, total):
         try:
+            recv = float(recv or 0.0)
+            sent = float(sent or 0.0)
+            total = float(total or 0.0)
+            if total <= 0.0 and recv <= 0.0 and sent <= 0.0:
+                return
+
             existing = conn.execute(
                 self.interfaceTrafficSnapshotTable.select().where(
                     self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
@@ -1145,13 +1171,16 @@ class WireguardConfiguration:
             ).mappings().first()
             
             if existing:
+                prev_recv  = float(existing.get('total_receive') or 0.0)
+                prev_sent  = float(existing.get('total_sent') or 0.0)
+                prev_total = float(existing.get('total_data') or 0.0)
                 conn.execute(
                     self.interfaceTrafficSnapshotTable.update()
                     .where(self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name)
                     .values(
-                        total_receive = existing['total_receive'] + recv,
-                        total_sent    = existing['total_sent'] + sent,
-                        total_data    = existing['total_data'] + total,
+                        total_receive = prev_recv + recv,
+                        total_sent    = prev_sent + sent,
+                        total_data    = prev_total + total,
                         last_updated  = datetime.now()
                     )
                 )
@@ -1167,6 +1196,7 @@ class WireguardConfiguration:
                 )
         except Exception as e:
             current_app.logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
+            raise e
 
     def _compute_data_usage(self) -> dict:
         """
@@ -1212,9 +1242,9 @@ class WireguardConfiguration:
                         self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
                     )
                 ).mappings().first()
-                s_recv  = float(snap['total_receive']) if snap else 0.0
-                s_sent  = float(snap['total_sent'])    if snap else 0.0
-                s_total = float(snap['total_data'])    if snap else 0.0
+                s_recv  = float(snap.get('total_receive') or 0.0) if snap else 0.0
+                s_sent  = float(snap.get('total_sent') or 0.0)    if snap else 0.0
+                s_total = float(snap.get('total_data') or 0.0)    if snap else 0.0
 
             res = {
                 "Total":   a_total + r_total + s_total,
@@ -1453,6 +1483,7 @@ class WireguardConfiguration:
                 doRenameStatement("_restrict_access")
                 doRenameStatement("_deleted")
                 doRenameStatement("_transfer")
+                doRenameStatement("_history_endpoint")
                 doRenameStatement("_traffic_snapshot")
                 conn.execute(
                     sqlalchemy.text(

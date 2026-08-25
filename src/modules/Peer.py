@@ -311,10 +311,10 @@ class Peer:
                 cur_total = cur_recv + cur_sent
 
                 if mode == "total":
-                    peer_total_receive = cumu_recv + cur_recv
-                    peer_total_sent    = cumu_sent + cur_sent
-                    peer_total_data    = cumu_data + total_data
-                    if peer_total_data > 0 or peer_total_receive > 0 or peer_total_sent > 0:
+                    peer_total_receive = float(cumu_recv or 0.0) + float(cur_recv or 0.0)
+                    peer_total_sent    = float(cumu_sent or 0.0) + float(cur_sent or 0.0)
+                    peer_total_data    = float(cumu_data or 0.0) + float(total_data or (cur_recv + cur_sent))
+                    if peer_total_data > 0.0 or peer_total_receive > 0.0 or peer_total_sent > 0.0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, peer_total_sent, peer_total_data
                         )
@@ -354,10 +354,10 @@ class Peer:
                     self.cumu_sent = new_cumu_sent
                     self.cumu_receive = new_cumu_recv
                 elif mode == "receive":
-                    peer_total_receive = cumu_recv + cur_recv
-                    if peer_total_receive > 0:
+                    peer_total_receive = float(cumu_recv or 0.0) + float(cur_recv or 0.0)
+                    if peer_total_receive > 0.0:
                         self.configuration._add_to_traffic_snapshot(
-                            conn, peer_total_receive, 0, peer_total_receive
+                            conn, peer_total_receive, 0.0, peer_total_receive
                         )
                     new_cumu_recv = -cur_recv
 
@@ -386,10 +386,10 @@ class Peer:
                     self.total_data = cur_recv + cur_sent
                     self.cumu_data = new_cumu_recv + cumu_sent
                 elif mode == "sent":
-                    peer_total_sent = cumu_sent + cur_sent
-                    if peer_total_sent > 0:
+                    peer_total_sent = float(cumu_sent or 0.0) + float(cur_sent or 0.0)
+                    if peer_total_sent > 0.0:
                         self.configuration._add_to_traffic_snapshot(
-                            conn, 0, peer_total_sent, peer_total_sent
+                            conn, 0.0, peer_total_sent, peer_total_sent
                         )
                     new_cumu_sent = -cur_sent
 

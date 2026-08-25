@@ -17,14 +17,21 @@ class PeerJobLogger:
         self.metadata = db.MetaData()
         self.jobLogTable = db.Table('JobLog', self.metadata,
                                     db.Column('LogID', db.String(255), nullable=False, primary_key=True),
-                                    db.Column('JobID', db.String(255), nullable=False),
+                                    db.Column('JobID', db.String(255), nullable=False, index=True),
                                     db.Column('LogDate', (db.DATETIME if DashboardConfig.GetConfig("Database", "type")[1] == 'sqlite' else db.TIMESTAMP), 
-                                              server_default=db.func.now()),
-                                    db.Column('Status', db.String(255), nullable=False),
-                                    db.Column('Message', db.Text)
+                                              server_default=db.func.now(), index=True),
+                                    db.Column('Status', db.String(255), nullable=False, index=True),
+                                    db.Column('Message', db.Text),
+                                    extend_existing=True
                                     )
         self.logs: list[Log] = []
         self.metadata.create_all(self.engine)
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_joblog_jobid_status ON JobLog (JobID, Status);"))
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_joblog_logdate ON JobLog (LogDate);"))
+        except Exception:
+            pass
         self.AllPeerJobs = AllPeerJobs
     def log(self, JobID: str, Status: bool = True, Message: str = "") -> bool:
         try:

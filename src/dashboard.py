@@ -140,54 +140,65 @@ def autoPruneDatabaseLogs():
         
         # 1. Prune SQL Log database
         log_engine = create_engine(ConnectionString("wgdashboard_log"))
-        with log_engine.connect() as conn:
-            # Keep latest 5,000 DashboardLog rows
-            conn.execute(text("""
-                DELETE FROM "DashboardLog" 
-                WHERE rowid NOT IN (
-                    SELECT rowid FROM "DashboardLog" ORDER BY rowid DESC LIMIT 5000
-                )
-            """))
-            # Keep latest 1,000 JobLog rows
-            conn.execute(text("""
-                DELETE FROM "JobLog" 
-                WHERE rowid NOT IN (
-                    SELECT rowid FROM "JobLog" ORDER BY rowid DESC LIMIT 1000
-                )
-            """))
-            conn.commit()
-            
-            if log_engine.dialect.name == "sqlite":
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        try:
+            with log_engine.connect() as conn:
+                # Keep latest 5,000 DashboardLog rows
+                conn.execute(text("""
+                    DELETE FROM "DashboardLog" 
+                    WHERE rowid NOT IN (
+                        SELECT rowid FROM "DashboardLog" ORDER BY rowid DESC LIMIT 5000
+                    )
+                """))
+                # Keep latest 1,000 JobLog rows
+                conn.execute(text("""
+                    DELETE FROM "JobLog" 
+                    WHERE rowid NOT IN (
+                        SELECT rowid FROM "JobLog" ORDER BY rowid DESC LIMIT 1000
+                    )
+                """))
                 conn.commit()
+                
+                if log_engine.dialect.name == "sqlite":
+                    conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                    conn.commit()
+        finally:
+            log_engine.dispose()
 
         # 2. Prune expired PeerJobs (older than 14 days) and checkpoint wgdashboard_job
         job_engine = create_engine(ConnectionString("wgdashboard_job"))
-        with job_engine.connect() as conn:
-            conn.execute(text("""
-                DELETE FROM "PeerJobs" 
-                WHERE "ExpireDate" IS NOT NULL 
-                AND "ExpireDate" < datetime('now', '-14 days')
-            """))
-            conn.commit()
-            if job_engine.dialect.name == "sqlite":
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        try:
+            with job_engine.connect() as conn:
+                conn.execute(text("""
+                    DELETE FROM "PeerJobs" 
+                    WHERE "ExpireDate" IS NOT NULL 
+                    AND "ExpireDate" < datetime('now', '-14 days')
+                """))
                 conn.commit()
+                if job_engine.dialect.name == "sqlite":
+                    conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                    conn.commit()
+        finally:
+            job_engine.dispose()
 
         # 3. Checkpoint main wgdashboard.db
         main_engine = create_engine(ConnectionString("wgdashboard"))
-        with main_engine.connect() as conn:
-            if main_engine.dialect.name == "sqlite":
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                conn.commit()
+        try:
+            with main_engine.connect() as conn:
+                if main_engine.dialect.name == "sqlite":
+                    conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                    conn.commit()
+        finally:
+            main_engine.dispose()
 
-        # 4. Prune old text log files (keep 3 days)
+        # 4. Prune old text log files (keep 7 days, preserve active log files)
         log_dir = os.path.abspath("./log")
         if os.path.exists(log_dir):
-            cutoff = time.time() - (3 * 86400)
+            cutoff = time.time() - (7 * 86400)
+            today_str = datetime.today().strftime('%Y_%m_%d')
             for f in glob.glob(os.path.join(log_dir, "*.log")):
                 try:
-                    if os.path.getmtime(f) < cutoff:
+                    # Never delete today's active logs or files modified within 7 days
+                    if today_str not in os.path.basename(f) and os.path.getmtime(f) < cutoff:
                         os.remove(f)
                 except Exception:
                     pass
@@ -1494,10 +1505,13 @@ def API_getConfigurationInfo():
     configurationName = request.args.get("configurationName")
     if not configurationName or configurationName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Please provide configuration name")
+    config = WireguardConfigurations[configurationName]
+    restricted_peers = config.getRestrictedPeersList()
+    active_peers = config.Peers or []
     return ResponseObject(data={
-        "configurationInfo": WireguardConfigurations[configurationName].toJson(),
-        "configurationPeers": WireguardConfigurations[configurationName].getPeersList(),
-        "configurationRestrictedPeers": WireguardConfigurations[configurationName].getRestrictedPeersList()
+        "configurationInfo": config.toJson(),
+        "configurationPeers": active_peers + (restricted_peers or []),
+        "configurationRestrictedPeers": restricted_peers
     })
 
 @app.get(f'{APP_PREFIX}/api/getPeerHistoricalEndpoints')

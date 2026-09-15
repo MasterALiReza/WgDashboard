@@ -116,12 +116,12 @@ class Peer:
 
             try:
                 rand = random.Random()
-                uid = str(uuid.UUID(int=rand.getrandbits(128), version=4))
+                uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
                 psk_exist = len(preshared_key) > 0
 
                 try:
                     if psk_exist:
-                        with open(uid, "w+") as f:
+                        with open(uid, "w") as f:
                             f.write(preshared_key)
 
                     newAllowedIPs = allowed_ip.replace(" ", "")
@@ -129,20 +129,24 @@ class Peer:
                         return False, "Allowed IPs entry format is incorrect"
 
                     command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
-                    updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                    updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
                 finally:
                     if psk_exist and os.path.exists(uid):
-                        os.remove(uid)
+                        try:
+                            os.remove(uid)
+                        except Exception:
+                            pass
 
                 if len(updateAllowedIp.decode().strip("\n")) != 0:
                     current_app.logger.error("Update peer failed when updating Allowed IPs")
                     return False, "Internal server error"
 
                 command = [f"{self.configuration.Protocol}-quick", "save", self.configuration.Name]
-                saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=10)
+                saveConfig = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
 
-                if f"wg showconf {self.configuration.Name}" not in saveConfig.decode().strip('\n'):
-                    current_app.logger.error("Update peer failed when saving the configuration")
+                expected_cmd = f"{self.configuration.Protocol} showconf {self.configuration.Name}"
+                if expected_cmd not in saveConfig.decode().strip('\n'):
+                    current_app.logger.error(f"Update peer failed when saving the configuration: expected '{expected_cmd}' in output")
                     return False, "Internal server error"
 
                 with self.configuration.engine.begin() as conn:

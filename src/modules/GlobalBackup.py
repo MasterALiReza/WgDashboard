@@ -7,9 +7,46 @@ import shutil
 import uuid
 import threading
 from datetime import datetime, timedelta
+import subprocess
+import tempfile
 import sqlalchemy as db
 from sqlalchemy.schema import CreateTable
 from .DatabaseConnection import ConnectionString
+
+def sync_interface_runtime(interface: str, protocol: str, conf_path: str) -> tuple[bool, str]:
+    """
+    Safely synchronizes the running WireGuard or AmneziaWG kernel runtime with the .conf file on disk
+    using non-disruptive syncconf. Active connections remain alive without dropping handshakes.
+    """
+    try:
+        check_cmd = [protocol, "show", interface]
+        subprocess.check_output(check_cmd, stderr=subprocess.STDOUT, timeout=10)
+    except Exception:
+        return True, f"Interface {interface} is not active in kernel, skipping syncconf."
+
+    if not os.path.exists(conf_path):
+        return False, f"Configuration file {conf_path} does not exist."
+
+    tmp_stripped = None
+    try:
+        strip_cmd = [f"{protocol}-quick", "strip", conf_path]
+        stripped_content = subprocess.check_output(strip_cmd, stderr=subprocess.STDOUT, timeout=15)
+
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False, prefix="wgd_sync_", suffix=".conf") as tf:
+            tf.write(stripped_content)
+            tmp_stripped = tf.name
+
+        sync_cmd = [protocol, "syncconf", interface, tmp_stripped]
+        subprocess.check_output(sync_cmd, stderr=subprocess.STDOUT, timeout=15)
+        return True, f"Interface {interface} kernel synchronized successfully."
+    except Exception as e:
+        return False, f"Failed to sync interface {interface} runtime: {e}"
+    finally:
+        if tmp_stripped and os.path.exists(tmp_stripped):
+            try:
+                os.remove(tmp_stripped)
+            except Exception:
+                pass
 
 GLOBAL_BACKUP_DIR = os.getenv('GLOBAL_BACKUP_PATH', os.path.join(os.getenv('CONFIGURATION_PATH', '.'), 'GlobalBackups'))
 
@@ -441,6 +478,24 @@ class GlobalBackupManager:
                 zipf.extractall(temp_extract)
 
             config_path = os.getenv('CONFIGURATION_PATH', '.')
+            target_wg = "/etc/wireguard"
+            target_amnezia = "/etc/amnezia/amneziawg"
+
+            restored_ini = os.path.join(temp_extract, 'wg-dashboard.ini')
+            if not os.path.exists(restored_ini):
+                restored_ini = os.path.join(config_path, 'wg-dashboard.ini')
+            if os.path.exists(restored_ini):
+                try:
+                    import configparser
+                    config = configparser.ConfigParser()
+                    config.read(restored_ini)
+                    if 'Server' in config:
+                        if 'wg_conf_path' in config['Server']:
+                            target_wg = config['Server']['wg_conf_path']
+                        if 'awg_conf_path' in config['Server']:
+                            target_amnezia = config['Server']['awg_conf_path']
+                except Exception:
+                    pass
 
             # 1. Restore ini & config files
             report(20, "restoring_configs")
@@ -465,23 +520,6 @@ class GlobalBackupManager:
             report(40, "restoring_wireguard")
             configs_src = os.path.join(temp_extract, 'configs')
             if os.path.exists(configs_src) and os.path.isdir(configs_src):
-                target_wg = "/etc/wireguard"
-                target_amnezia = "/etc/amnezia/amneziawg"
-                
-                restored_ini = os.path.join(temp_extract, 'wg-dashboard.ini')
-                if os.path.exists(restored_ini):
-                    try:
-                        import configparser
-                        config = configparser.ConfigParser()
-                        config.read(restored_ini)
-                        if 'Server' in config:
-                            if 'wg_conf_path' in config['Server']:
-                                target_wg = config['Server']['wg_conf_path']
-                            if 'awg_conf_path' in config['Server']:
-                                target_amnezia = config['Server']['awg_conf_path']
-                    except Exception:
-                        pass
-                        
                 os.makedirs(target_wg, exist_ok=True)
                 
                 # Backwards compatibility: root .conf files are wireguard
@@ -514,9 +552,29 @@ class GlobalBackupManager:
                     with open(os.path.join(sql_src, dump_file), 'r', encoding='utf-8', errors='ignore') as f:
                         sql_content = f.read()
                     restore_database_from_sql(db_name, sql_content)
-                    # Report granular progress between 60% and 90%
-                    pct = 60 + int(30 * (idx + 1) / total_dumps)
+                    # Report granular progress between 60% and 85%
+                    pct = 60 + int(25 * (idx + 1) / total_dumps)
                     report(pct, "restoring_databases")
+
+            # 4. Synchronize running kernel interfaces with restored configs
+            report(90, "syncing_runtime")
+            restored_confs = {}
+            if os.path.exists(target_wg):
+                for f in os.listdir(target_wg):
+                    if f.endswith('.conf'):
+                        iface = f[:-5]
+                        restored_confs[iface] = ('wg', os.path.join(target_wg, f))
+            if os.path.exists(target_amnezia):
+                for f in os.listdir(target_amnezia):
+                    if f.endswith('.conf'):
+                        iface = f[:-5]
+                        restored_confs[iface] = ('awg', os.path.join(target_amnezia, f))
+
+            for iface, (proto, cpath) in restored_confs.items():
+                try:
+                    sync_interface_runtime(iface, proto, cpath)
+                except Exception:
+                    pass
 
             report(95, "finalizing")
             shutil.rmtree(temp_extract, ignore_errors=True)

@@ -86,10 +86,16 @@ def peerInformationBackgroundThread():
     app.logger.info("Background Thread #1 Started")
     app.logger.info("Background Thread #1 PID:" + str(threading.get_native_id()))
     delay = 6
+    reconcile_patrol_counter = 0
     time.sleep(10)
     while True:
         with app.app_context():
             try:
+                reconcile_patrol_counter += 1
+                should_reconcile = (reconcile_patrol_counter >= 30)
+                if should_reconcile:
+                    reconcile_patrol_counter = 0
+
                 with WireguardConfigurationsLock:
                     curKeys = list(WireguardConfigurations.keys())
                 for name in curKeys:
@@ -97,6 +103,16 @@ def peerInformationBackgroundThread():
                         c = WireguardConfigurations.get(name)
                     if c is not None:
                         if c.getStatus():
+                            if should_reconcile:
+                                try:
+                                    rec_res = c.reconcileWithKernel()
+                                    if rec_res.get("repaired_peers") or rec_res.get("restricted_removed"):
+                                        app.logger.warning(
+                                            f"[Self-Healing] Reconciled {name}: repaired {len(rec_res.get('repaired_peers', []))} peers, "
+                                            f"removed {len(rec_res.get('restricted_removed', []))} restricted peers."
+                                        )
+                                except Exception as rec_err:
+                                    app.logger.error(f"[Self-Healing] Error reconciling {name}: {rec_err}")
                             c.refreshPeersRuntimeStats()
                             c.getPeers()
                             if DashboardConfig.GetConfig('WireGuardConfiguration', 'peer_tracking')[1] is True:
@@ -329,6 +345,15 @@ def InitWireguardConfigurationsList(startup: bool = False):
                                 WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
                     except WireguardConfiguration.InvalidConfigurationFileException as e:
                         app.logger.error(f"{i} have an invalid configuration file.")
+
+        if startup:
+            for conf_name, conf_obj in list(WireguardConfigurations.items()):
+                try:
+                    if conf_obj.getStatus():
+                        app.logger.info(f"Startup: Running reconcileWithKernel for active interface {conf_name}...")
+                        conf_obj.reconcileWithKernel()
+                except Exception as e:
+                    app.logger.error(f"Startup reconcile failed for {conf_name}: {e}")
 
 def startThreads():
     bgThread = threading.Thread(target=peerInformationBackgroundThread, daemon=True)
@@ -1195,16 +1220,23 @@ def API_resetPeerData(configName):
     if len(id) == 0 or configName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Configuration/Peer does not exist")
     wgc = WireguardConfigurations.get(configName)
-    foundPeer, peer = wgc.searchPeer(id)
-    if not foundPeer:
-        return ResponseObject(False, "Configuration/Peer does not exist")
-    
-    resetStatus = peer.resetDataUsage(type)
-    if resetStatus:
-        wgc.restrictPeers([id])
-        wgc.allowAccessPeers([id])
-    
-    return ResponseObject(status=resetStatus)
+    with wgc.lock:
+        foundPeer, peer = wgc.searchPeer(id)
+        if not foundPeer:
+            return ResponseObject(False, "Configuration/Peer does not exist")
+        
+        resetStatus = peer.resetDataUsage(type)
+        if resetStatus:
+            is_restricted = False
+            for r_peer in (wgc.RestrictedPeers or []):
+                if r_peer.id == id or r_peer.id == id.strip().replace(' ', '+'):
+                    is_restricted = True
+                    break
+            if not is_restricted and wgc.getStatus():
+                wgc.restrictPeers([id], reason="Resetting data usage")
+                wgc.allowAccessPeers([id])
+        
+        return ResponseObject(status=resetStatus)
 
 @app.post(f'{APP_PREFIX}/api/deletePeers/<configName>')
 def API_deletePeers(configName: str) -> ResponseObject:
@@ -1236,8 +1268,9 @@ def API_restrictPeers(configName: str) -> ResponseObject:
         if len(peers) == 0:
             return ResponseObject(False, "Please specify one or more peers")
         configuration = WireguardConfigurations.get(configName)
-        status, msg = configuration.restrictPeers(peers)
-        return ResponseObject(status, msg)
+        with configuration.lock:
+            status, msg = configuration.restrictPeers(peers)
+            return ResponseObject(status, msg)
     return ResponseObject(False, "Configuration does not exist", status_code=404)
 
 @app.post(f'{APP_PREFIX}/api/sharePeer/create')
@@ -1303,9 +1336,20 @@ def API_allowAccessPeers(configName: str) -> ResponseObject:
         if len(peers) == 0:
             return ResponseObject(False, "Please specify one or more peers")
         configuration = WireguardConfigurations.get(configName)
-        status, msg = configuration.allowAccessPeers(peers)
-        return ResponseObject(status, msg)
+        with configuration.lock:
+            status, msg = configuration.allowAccessPeers(peers)
+            return ResponseObject(status, msg)
     return ResponseObject(False, "Configuration does not exist")
+
+@app.post(f'{APP_PREFIX}/api/reconcileConfiguration/<configName>')
+def API_reconcileConfiguration(configName: str) -> ResponseObject:
+    if configName in WireguardConfigurations.keys():
+        configuration = WireguardConfigurations.get(configName)
+        if not configuration.getStatus():
+            return ResponseObject(False, f"Configuration {configName} is not active", status_code=400)
+        res = configuration.reconcileWithKernel()
+        return ResponseObject(True, "Configuration reconciled successfully", data=res)
+    return ResponseObject(False, "Configuration does not exist", status_code=404)
 
 @app.post(f'{APP_PREFIX}/api/addPeers/<configName>')
 def API_addPeers(configName):

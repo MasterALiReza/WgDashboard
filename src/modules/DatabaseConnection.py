@@ -12,8 +12,9 @@ logger = logging.getLogger("WGDashboard")
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     # Set connection-level pragmas for concurrency, performance, and cache
-    if dbapi_connection.__class__.__module__ == "sqlite3":
+    if isinstance(dbapi_connection, sqlite3.Connection) or "sqlite" in getattr(dbapi_connection.__class__, "__module__", ""):
         cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA busy_timeout=60000")
         cursor.execute("PRAGMA cache_size=-64000")
@@ -52,15 +53,26 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str):
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)
-    parser.read_file(open('wg-dashboard.ini', "r+"))
+    config_path = os.getenv('CONFIGURATION_PATH', '.')
+    ini_path = os.path.join(config_path, 'wg-dashboard.ini')
+    if not os.path.exists(ini_path) and os.path.exists('wg-dashboard.ini'):
+        ini_path = 'wg-dashboard.ini'
 
-    sqlitePath = os.path.join("db")
+    if os.path.exists(ini_path):
+        try:
+            with open(ini_path, "r", encoding="utf-8") as f:
+                parser.read_file(f)
+        except Exception as e:
+            logger.warning(f"[WGDashboard] Could not parse config file '{ini_path}': {e}")
+
+    sqlitePath = os.path.join(config_path, "db")
     if not os.path.isdir(sqlitePath):
-        os.mkdir(sqlitePath)
+        os.makedirs(sqlitePath, exist_ok=True)
 
-    if parser.get("Database", "type") == "postgresql":
+    db_type = parser.get("Database", "type", fallback="sqlite") if parser.has_section("Database") else "sqlite"
+    if db_type == "postgresql":
         cn = f'postgresql+psycopg://{parser.get("Database", "username")}:{parser.get("Database", "password")}@{parser.get("Database", "host")}/{database}'
-    elif parser.get("Database", "type") == "mysql":
+    elif db_type == "mysql":
         cn = f'mysql+pymysql://{parser.get("Database", "username")}:{parser.get("Database", "password")}@{parser.get("Database", "host")}/{database}'
     else:
         db_file = os.path.join(sqlitePath, f"{database}.db")

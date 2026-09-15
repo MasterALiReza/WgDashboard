@@ -174,14 +174,15 @@ class PeerJobs:
                             else:
                                 reason = "Time Limit Reached"
                                 
-                            if job.Action == "restrict":
-                                s, msg = c.restrictPeers([fp.id], reason=reason)
-                            elif job.Action == "delete":
-                                s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
-                            elif job.Action == "reset_total_data_usage":
-                                s = fp.resetDataUsage("total")
-                                c.restrictPeers([fp.id], reason="Resetting data usage")
-                                c.allowAccessPeers([fp.id])
+                            with c.lock:
+                                if job.Action == "restrict":
+                                    s, msg = c.restrictPeers([fp.id], reason=reason)
+                                elif job.Action == "delete":
+                                    s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
+                                elif job.Action == "reset_total_data_usage":
+                                    s = fp.resetDataUsage("total")
+                                    c.restrictPeers([fp.id], reason="Resetting data usage")
+                                    c.allowAccessPeers([fp.id])
                             if s is True:
                                 self.JobLogger.log(job.JobID, s,
                                               f"Peer {fp.id} from {c.Name} is successfully {job.Action}ed."

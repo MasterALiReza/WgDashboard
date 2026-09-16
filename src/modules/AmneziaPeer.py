@@ -41,12 +41,13 @@ class AmneziaPeer(Peer):
 
         used_allowed_ips = []
         for peer in peers:
-            ips = peer.allowed_ip.split(',')
+            ips = (peer.allowed_ip or '').split(',')
             for ip in ips:
-                used_allowed_ips.append(ip.strip())
+                if ip.strip():
+                    used_allowed_ips.append(ip.strip())
 
-        for ip in allowed_ip.split(','):
-            if ip.strip() in used_allowed_ips:
+        for ip in (allowed_ip or '').split(','):
+            if ip.strip() and ip.strip() in used_allowed_ips:
                 return False, "Allowed IP already taken by another peer"
 
         if not ValidateDNSAddress(dns_addresses):
@@ -111,6 +112,7 @@ class AmneziaPeer(Peer):
                         "private_key": private_key,
                         "DNS": dns_addresses,
                         "endpoint_allowed_ip": endpoint_allowed_ip,
+                        "allowed_ip": newAllowedIPs,
                         "mtu": mtu,
                         "keepalive": keepalive,
                         "notes": notes,
@@ -119,6 +121,14 @@ class AmneziaPeer(Peer):
                         self.configuration.peersTable.c.id == self.id
                     )
                 )
+            self.name = name
+            self.allowed_ip = newAllowedIPs
+            self.DNS = dns_addresses
+            self.endpoint_allowed_ip = endpoint_allowed_ip
+            self.mtu = mtu
+            self.keepalive = keepalive
+            self.notes = notes
+            self.preshared_key = preshared_key
             self.configuration.getPeers()
             return True, None
         except subprocess.CalledProcessError as exc:

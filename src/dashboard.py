@@ -375,7 +375,7 @@ dictConfig({
 
 
 WireguardConfigurations: dict[str, WireguardConfiguration] = {}
-WireguardConfigurationsLock = threading.Lock()
+WireguardConfigurationsLock = threading.RLock()
 CONFIGURATION_PATH = os.getenv('CONFIGURATION_PATH', '.')
 
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 5206928
@@ -1400,7 +1400,7 @@ def API_addPeers(configName):
                     config.toggleConfiguration()
                 ipStatus, availableIps = config.getAvailableIP(-1)
                 ipCountStatus, numberOfAvailableIPs = config.getNumberOfAvailableIP()
-                defaultIPSubnet = list(availableIps.keys())[0]
+                defaultIPSubnet = list(availableIps.keys())[0] if availableIps and len(availableIps.keys()) > 0 else ""
                 if bulkAdd:
                     if type(preshared_key_bulkAdd) is not bool:
                         preshared_key_bulkAdd = False
@@ -1562,8 +1562,8 @@ def API_getConfigurationInfo():
 def API_GetPeerHistoricalEndpoints():
     configurationName = request.args.get("configurationName")
     id = request.args.get('id')
-    if not configurationName or not id:
-        return ResponseObject(False, "Please provide configurationName and id")
+    if not configurationName or not id or configurationName not in WireguardConfigurations.keys():
+        return ResponseObject(False, "Please provide valid configurationName and id")
     fp, p = WireguardConfigurations.get(configurationName).searchPeer(id)
     if fp:
         result = p.getEndpoints()
@@ -1601,8 +1601,8 @@ def API_GetPeerSessions():
                     return ResponseObject(False, "startDate must be smaller than endDate")
     except Exception as e:
         return ResponseObject(False, "Dates are invalid")
-    if not configurationName or not id:
-        return ResponseObject(False, "Please provide configurationName and id")
+    if not configurationName or not id or configurationName not in WireguardConfigurations.keys():
+        return ResponseObject(False, "Please provide valid configurationName and id")
     fp, p = WireguardConfigurations.get(configurationName).searchPeer(id)
     if fp:
         return ResponseObject(data=p.getSessions(startDate, endDate))
@@ -1629,9 +1629,9 @@ def API_GetPeerTraffics():
                 if startDate > endDate:
                     return ResponseObject(False, "startDate must be smaller than endDate")
     except Exception as e:
-        return ResponseObject(False, "Dates are invalid" + e)
-    if not configurationName or not id:
-        return ResponseObject(False, "Please provide configurationName and id")
+        return ResponseObject(False, f"Dates are invalid: {e}")
+    if not configurationName or not id or configurationName not in WireguardConfigurations.keys():
+        return ResponseObject(False, "Please provide valid configurationName and id")
     fp, p = WireguardConfigurations.get(configurationName).searchPeer(id)
     if fp:
         return ResponseObject(data=p.getTraffics(interval, startDate, endDate))

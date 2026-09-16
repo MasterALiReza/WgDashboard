@@ -575,138 +575,139 @@ class WireguardConfiguration:
                 conn.execute(self.peersHistoryEndpointTable.insert(), inserts)
                           
     def addPeers(self, peers: list) -> tuple[bool, list, str]:
-        result = {
-            "message": None,
-            "peers": []
-        }
-        try:
-            if not self.getStatus():
-                self.toggleConfiguration()
-
-            cleanedAllowedIPs = {}
-            for p in peers:
-                p['id'] = (p.get('id') or '').strip().replace(' ', '+')
-                newAllowedIPs = (p.get('allowed_ip') or '').replace(" ", "")
-                if not CheckAddress(newAllowedIPs):
-                    return False, [], "Allowed IPs entry format is incorrect"
-                if not CheckPeerKey(p["id"]):
-                    return False, [], "Peer key format is incorrect"
-                cleanedAllowedIPs[p["id"]] = newAllowedIPs
-
-            # Prevent duplicate IP collision across existing active and restricted peers
-            used_allowed_ips = set()
+        with self.lock:
+            result = {
+                "message": None,
+                "peers": []
+            }
             try:
-                with self.engine.connect() as conn:
-                    for row in conn.execute(self.peersTable.select()).mappings().fetchall():
-                        for ip in (row.get('allowed_ip') or '').split(','):
-                            ip_clean = ip.strip()
-                            if ip_clean and ip_clean != "N/A":
-                                used_allowed_ips.add(ip_clean)
-                    for row in conn.execute(self.peersRestrictedTable.select()).mappings().fetchall():
-                        for ip in (row.get('allowed_ip') or '').split(','):
-                            ip_clean = ip.strip()
-                            if ip_clean and ip_clean != "N/A":
-                                used_allowed_ips.add(ip_clean)
-            except Exception as e:
-                current_app.logger.warning(f"Failed to query DB for used allowed IPs: {e}")
-                for existing_p in self.getPeersList():
-                    for ip in (getattr(existing_p, 'allowed_ip', '') or '').split(','):
-                        ip_clean = ip.strip()
-                        if ip_clean and ip_clean != "N/A":
-                            used_allowed_ips.add(ip_clean)
+                if not self.getStatus():
+                    self.toggleConfiguration()
 
-            for p in peers:
-                for ip in cleanedAllowedIPs[p['id']].split(','):
-                    ip_clean = ip.strip()
-                    if ip_clean in used_allowed_ips:
-                        return False, [], f"Allowed IP already taken by another peer: {ip_clean}"
-
-            # Phase 1: Configure WireGuard kernel runtime first with rollback tracking
-            applied_keys_to_kernel = []
-            try:
+                cleanedAllowedIPs = {}
                 for p in peers:
-                    presharedKeyExist = len(p.get('preshared_key', '')) > 0
-                    rd = random.Random()
-                    uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
-                    try:
-                        if presharedKeyExist:
-                            with open(uid, "w") as f:
-                                f.write(p['preshared_key'])
+                    p['id'] = (p.get('id') or '').strip().replace(' ', '+')
+                    newAllowedIPs = (p.get('allowed_ip') or '').replace(" ", "")
+                    if not CheckAddress(newAllowedIPs):
+                        return False, [], "Allowed IPs entry format is incorrect"
+                    if not CheckPeerKey(p["id"]):
+                        return False, [], "Peer key format is incorrect"
+                    cleanedAllowedIPs[p["id"]] = newAllowedIPs
 
-                        command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
-                        applied_keys_to_kernel.append(p['id'])
-                    finally:
-                        if presharedKeyExist and os.path.exists(uid):
-                            try:
-                                os.remove(uid)
-                            except Exception:
-                                pass
-            except Exception as kernel_err:
-                current_app.logger.error(f"Kernel apply error during addPeers: {kernel_err}")
-                for applied_id in applied_keys_to_kernel:
-                    try:
-                        subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
-                    except Exception:
-                        pass
-                return False, [], f"WireGuard kernel configuration failed: {kernel_err}"
+                # Prevent duplicate IP collision across existing active and restricted peers
+                used_allowed_ips = set()
+                try:
+                    with self.engine.connect() as conn:
+                        for row in conn.execute(self.peersTable.select()).mappings().fetchall():
+                            for ip in (row.get('allowed_ip') or '').split(','):
+                                ip_clean = ip.strip()
+                                if ip_clean and ip_clean != "N/A":
+                                    used_allowed_ips.add(ip_clean)
+                        for row in conn.execute(self.peersRestrictedTable.select()).mappings().fetchall():
+                            for ip in (row.get('allowed_ip') or '').split(','):
+                                ip_clean = ip.strip()
+                                if ip_clean and ip_clean != "N/A":
+                                    used_allowed_ips.add(ip_clean)
+                except Exception as e:
+                    current_app.logger.warning(f"Failed to query DB for used allowed IPs: {e}")
+                    for existing_p in self.getPeersList():
+                        for ip in (getattr(existing_p, 'allowed_ip', '') or '').split(','):
+                            ip_clean = ip.strip()
+                            if ip_clean and ip_clean != "N/A":
+                                used_allowed_ips.add(ip_clean)
 
-            # Phase 2: Insert into SQLite database in a single transaction
-            try:
-                with self.engine.begin() as conn:
-                    for i in peers:
-                        newPeer = {
-                            "id": i['id'],
-                            "private_key": i.get('private_key', ''),
-                            "DNS": i.get('DNS', ''),
-                            "endpoint_allowed_ip": i.get('endpoint_allowed_ip', ''),
-                            "name": i.get('name', ''),
-                            "total_receive": 0,
-                            "total_sent": 0,
-                            "total_data": 0,
-                            "endpoint": "N/A",
-                            "status": "stopped",
-                            "latest_handshake": "N/A",
-                            "allowed_ip": cleanedAllowedIPs[i['id']],
-                            "cumu_receive": 0,
-                            "cumu_sent": 0,
-                            "cumu_data": 0,
-                            "mtu": i.get('mtu'),
-                            "keepalive": i.get('keepalive'),
-                            "notes": i.get("notes", ""),
-                            "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
-                            "preshared_key": i.get("preshared_key", "")
-                        }
-                        conn.execute(
-                            self.peersTable.insert().values(newPeer)
-                        )
-            except Exception as db_err:
-                current_app.logger.error(f"Database insert error during addPeers: {db_err}")
-                # Rollback kernel
-                for applied_id in applied_keys_to_kernel:
-                    try:
-                        subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
-                    except Exception:
-                        pass
-                return False, [], "Failed to save peer records in database"
+                for p in peers:
+                    for ip in cleanedAllowedIPs[p['id']].split(','):
+                        ip_clean = ip.strip()
+                        if ip_clean in used_allowed_ips:
+                            return False, [], f"Allowed IP already taken by another peer: {ip_clean}"
 
-            # Phase 3: Persist consistent state to .conf file
-            self.__wgSave()
+                # Phase 1: Configure WireGuard kernel runtime first with rollback tracking
+                applied_keys_to_kernel = []
+                try:
+                    for p in peers:
+                        presharedKeyExist = len(p.get('preshared_key', '')) > 0
+                        rd = random.Random()
+                        uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
+                        try:
+                            if presharedKeyExist:
+                                with open(uid, "w") as f:
+                                    f.write(p['preshared_key'])
 
-            self._peers_dict = None
-            self.getPeers()
-            for p in peers:
-                found, pf = self.searchPeer(p['id'])
-                if found:
-                    result['peers'].append(pf)
-            self.DashboardWebHooks.RunWebHook("peer_created", {
-                "configuration": self.Name,
-                "peers": list(map(lambda k : k['id'], peers))
-            })
-        except Exception as e:
-            current_app.logger.error(f"Add peers error: {e}")
-            return False, [], "Internal server error"
-        return True, result['peers'], ""
+                            command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                            subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                            applied_keys_to_kernel.append(p['id'])
+                        finally:
+                            if presharedKeyExist and os.path.exists(uid):
+                                try:
+                                    os.remove(uid)
+                                except Exception:
+                                    pass
+                except Exception as kernel_err:
+                    current_app.logger.error(f"Kernel apply error during addPeers: {kernel_err}")
+                    for applied_id in applied_keys_to_kernel:
+                        try:
+                            subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
+                        except Exception:
+                            pass
+                    return False, [], f"WireGuard kernel configuration failed: {kernel_err}"
+
+                # Phase 2: Insert into SQLite database in a single transaction
+                try:
+                    with self.engine.begin() as conn:
+                        for i in peers:
+                            newPeer = {
+                                "id": i['id'],
+                                "private_key": i.get('private_key', ''),
+                                "DNS": i.get('DNS', ''),
+                                "endpoint_allowed_ip": i.get('endpoint_allowed_ip', ''),
+                                "name": i.get('name', ''),
+                                "total_receive": 0,
+                                "total_sent": 0,
+                                "total_data": 0,
+                                "endpoint": "N/A",
+                                "status": "stopped",
+                                "latest_handshake": "N/A",
+                                "allowed_ip": cleanedAllowedIPs[i['id']],
+                                "cumu_receive": 0,
+                                "cumu_sent": 0,
+                                "cumu_data": 0,
+                                "mtu": i.get('mtu'),
+                                "keepalive": i.get('keepalive'),
+                                "notes": i.get("notes", ""),
+                                "remote_endpoint": self.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1],
+                                "preshared_key": i.get("preshared_key", "")
+                            }
+                            conn.execute(
+                                self.peersTable.insert().values(newPeer)
+                            )
+                except Exception as db_err:
+                    current_app.logger.error(f"Database insert error during addPeers: {db_err}")
+                    # Rollback kernel
+                    for applied_id in applied_keys_to_kernel:
+                        try:
+                            subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
+                        except Exception:
+                            pass
+                    return False, [], "Failed to save peer records in database"
+
+                # Phase 3: Persist consistent state to .conf file
+                self.__wgSave()
+
+                self._peers_dict = None
+                self.getPeers()
+                for p in peers:
+                    found, pf = self.searchPeer(p['id'])
+                    if found:
+                        result['peers'].append(pf)
+                self.DashboardWebHooks.RunWebHook("peer_created", {
+                    "configuration": self.Name,
+                    "peers": list(map(lambda k : k['id'], peers))
+                })
+            except Exception as e:
+                current_app.logger.error(f"Add peers error: {e}")
+                return False, [], "Internal server error"
+            return True, result['peers'], ""
 
     def searchPeer(self, publicKey):
         if publicKey:
@@ -1183,7 +1184,7 @@ class WireguardConfiguration:
             except subprocess.CalledProcessError:
                 return "stopped"
 
-            lines = raw_dump.decode("UTF-8").strip().split("\n")
+            lines = raw_dump.decode("UTF-8", errors="ignore").strip().split("\n")
             if len(lines) <= 1:
                 return
 

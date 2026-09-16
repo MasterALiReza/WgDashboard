@@ -12,7 +12,7 @@ from flask import current_app
 
 class PeerJobs:
     def __init__(self, DashboardConfig, WireguardConfigurations, AllPeerShareLinks):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.Jobs: list[PeerJob] = []
         self.engine = db.create_engine(ConnectionString('wgdashboard_job'))
         self.metadata = db.MetaData()
@@ -104,7 +104,11 @@ class PeerJobs:
                     )
                     self.JobLogger.log(Job.JobID, Message=f"Job is updated from if {currentJob[0].Field} {currentJob[0].Operator} {currentJob[0].Value} then {currentJob[0].Action}; to if {Job.Field} {Job.Operator} {Job.Value} then {Job.Action}")
             self.__getJobs()
-            self.WireguardConfigurations.get(Job.Configuration).searchPeer(Job.Peer)[1].getJobs()
+            conf = self.WireguardConfigurations.get(Job.Configuration)
+            if conf:
+                found_peer, peer_obj = conf.searchPeer(Job.Peer)
+                if found_peer and peer_obj:
+                    peer_obj.getJobs()
             return True, list(
                 filter(lambda x: x.Configuration == Job.Configuration and x.Peer == Job.Peer and x.JobID == Job.JobID,
                        self.Jobs))
@@ -126,7 +130,11 @@ class PeerJobs:
                 )
                 self.JobLogger.log(Job.JobID, Message=f"Job is removed due to being deleted or finished.")
             self.__getJobs()
-            self.WireguardConfigurations.get(Job.Configuration).searchPeer(Job.Peer)[1].getJobs()
+            conf = self.WireguardConfigurations.get(Job.Configuration)
+            if conf:
+                found_peer, peer_obj = conf.searchPeer(Job.Peer)
+                if found_peer and peer_obj:
+                    peer_obj.getJobs()
             return True, None
         except Exception as e:
             return False, str(e)

@@ -119,32 +119,107 @@ def ValidatePasswordStrength(password: str) -> tuple[bool, str] | tuple[bool, No
 
 import threading
 import os
+import time
 try:
     import fcntl
 except ImportError:
     fcntl = None
 
 class ProcessLock:
-    def __init__(self, lock_file):
-        self.lock_file = lock_file
+    _instances = {}
+    _registry_lock = threading.Lock()
+
+    def __new__(cls, lock_file, timeout=30):
+        canonical_path = os.path.abspath(lock_file)
+        with cls._registry_lock:
+            if canonical_path not in cls._instances:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                cls._instances[canonical_path] = instance
+            return cls._instances[canonical_path]
+
+    def __init__(self, lock_file, timeout=30):
+        if getattr(self, '_initialized', False):
+            self.timeout = timeout
+            return
+        self.lock_file = os.path.abspath(lock_file)
         self.lock_fd = None
-        self.thread_lock = threading.Lock()
+        self.thread_lock = threading.RLock()
+        self.timeout = timeout
+        self._count = 0
+        self._owner = None
+        self._initialized = True
 
     def __enter__(self):
-        self.thread_lock.acquire()
+        current_thread = threading.get_ident()
+        # Acquire thread lock with timeout to prevent thread deadlock
+        acquired = self.thread_lock.acquire(timeout=self.timeout)
+        if not acquired:
+            raise TimeoutError(f"ProcessLock: Thread timeout ({self.timeout}s) waiting for lock on {self.lock_file}")
+
+        # If already owned by this thread, just increment recursion count
+        if self._owner == current_thread:
+            self._count += 1
+            return self
+
+        # First acquisition by this thread: acquire OS-level file lock
         if fcntl:
-            self.lock_fd = open(self.lock_file, "w")
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+            try:
+                os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
+                self.lock_fd = open(self.lock_file, "a+")
+                # Attempt non-blocking flock in a loop with timeout
+                start_time = time.time()
+                while True:
+                    try:
+                        fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except (BlockingIOError, IOError, OSError):
+                        if time.time() - start_time >= self.timeout:
+                            try:
+                                self.lock_fd.close()
+                            except Exception:
+                                pass
+                            self.lock_fd = None
+                            self.thread_lock.release()
+                            raise TimeoutError(f"ProcessLock: OS flock timeout ({self.timeout}s) on {self.lock_file}")
+                        time.sleep(0.05)
+            except Exception:
+                if self.lock_fd:
+                    try:
+                        self.lock_fd.close()
+                    except Exception:
+                        pass
+                    self.lock_fd = None
+                self.thread_lock.release()
+                raise
+
+        self._owner = current_thread
+        self._count = 1
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.lock_fd and fcntl:
-            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-            self.lock_fd.close()
-            self.lock_fd = None
-        self.thread_lock.release()
+        current_thread = threading.get_ident()
+        if self._owner != current_thread:
+            try:
+                self.thread_lock.release()
+            except RuntimeError:
+                pass
+            return
 
-import time
+        self._count -= 1
+        if self._count == 0:
+            self._owner = None
+            if self.lock_fd and fcntl:
+                try:
+                    fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                    self.lock_fd.close()
+                except Exception:
+                    pass
+                self.lock_fd = None
+            self.thread_lock.release()
+        else:
+            self.thread_lock.release()
+
 
 class SimpleRateLimiter:
     def __init__(self):

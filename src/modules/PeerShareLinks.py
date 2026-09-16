@@ -67,21 +67,37 @@ class PeerShareLinks:
                     )
                 )
             self.__getSharedLinks()
-            self.wireguardConfigurations.get(Configuration).searchPeer(Peer)[1].getShareLink()
+            conf = self.wireguardConfigurations.get(Configuration)
+            if conf:
+                found_peer, peer_obj = conf.searchPeer(Peer)
+                if found_peer and peer_obj:
+                    peer_obj.getShareLink()
         except Exception as e:
             return False, str(e)
         return True, newShareID
 
     def updateLinkExpireDate(self, ShareID, ExpireDate: datetime = None) -> tuple[bool, str]:
-        with self.engine.begin() as conn:
-            updated = conn.execute(
-                self.peerShareLinksTable.update().values(
-                    {
-                        "ExpireDate": ExpireDate
-                    }
-                ).returning(self.peerShareLinksTable.c.Configuration, self.peerShareLinksTable.c.Peer)
-                .where(self.peerShareLinksTable.columns.ShareID == ShareID)
-            ).mappings().fetchone()
-        self.__getSharedLinks()
-        self.wireguardConfigurations.get(updated.Configuration).searchPeer(updated.Peer)[1].getShareLink()
-        return True, ""
+        try:
+            with self.engine.connect() as conn:
+                existing = conn.execute(
+                    self.peerShareLinksTable.select().where(self.peerShareLinksTable.columns.ShareID == ShareID)
+                ).mappings().fetchone()
+            if not existing:
+                return False, "Share link does not exist"
+            with self.engine.begin() as conn:
+                conn.execute(
+                    self.peerShareLinksTable.update().values(
+                        {
+                            "ExpireDate": ExpireDate
+                        }
+                    ).where(self.peerShareLinksTable.columns.ShareID == ShareID)
+                )
+            self.__getSharedLinks()
+            conf = self.wireguardConfigurations.get(existing['Configuration'])
+            if conf:
+                found_peer, peer_obj = conf.searchPeer(existing['Peer'])
+                if found_peer and peer_obj:
+                    peer_obj.getShareLink()
+            return True, ""
+        except Exception as e:
+            return False, str(e)

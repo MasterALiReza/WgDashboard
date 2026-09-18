@@ -9,7 +9,7 @@ class SystemStatus:
         self.Disks = Disks()
         self.NetworkInterfaces = NetworkInterfaces()
         self.Processes = Processes()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._cached_data = None
         self._last_cache_time = 0
 

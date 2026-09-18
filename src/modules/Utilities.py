@@ -127,7 +127,7 @@ except ImportError:
 
 class ProcessLock:
     _instances = {}
-    _registry_lock = threading.Lock()
+    _registry_lock = threading.RLock()
 
     def __new__(cls, lock_file, timeout=30):
         canonical_path = os.path.abspath(lock_file)
@@ -223,7 +223,7 @@ class ProcessLock:
 
 class SimpleRateLimiter:
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._requests = {}
 
     def check_rate_limit(self, key: str, limit: int = 5, period: int = 60) -> bool:

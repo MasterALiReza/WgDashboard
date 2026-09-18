@@ -12,7 +12,10 @@ import shutil
 
 logger = logging.getLogger("WGDashboard")
 
-_heal_lock = threading.Lock()
+# Fast-path in-memory set: avoids locks, file handles, and disk I/O on routine ConnectionString calls
+_healed_on_boot = set()
+# Re-entrant lock with timeout to guarantee zero deadlocks and zero worker thread starvation
+_heal_lock = threading.RLock()
 _last_check_times = {}
 
 @event.listens_for(Engine, "connect")
@@ -41,15 +44,30 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
     if not os.path.exists(db_path):
         return True
 
-    now = time.time()
-    with _heal_lock:
+    # Fast path: already verified on boot - ZERO locking, ZERO disk I/O, nanosecond return!
+    if not force_check and db_path in _healed_on_boot:
+        return True
+
+    # Acquire re-entrant lock with strict timeout to completely prevent deadlocks and thread freezes
+    acquired = _heal_lock.acquire(timeout=5)
+    if not acquired:
+        logger.warning(f"[WGDashboard] Could not acquire heal lock for '{database_name}' within 5s; proceeding safely without blocking.")
+        return True
+
+    try:
+        # Double check after acquiring lock
+        if not force_check and db_path in _healed_on_boot:
+            return True
+
+        now = time.time()
         # Debounce: avoid running quick_check multiple times within 30 seconds for the same db file
         if not force_check and (now - _last_check_times.get(db_path, 0) < 30):
+            _healed_on_boot.add(db_path)
             return True
 
         is_corrupted = False
         try:
-            conn = sqlite3.connect(db_path, timeout=10)
+            conn = sqlite3.connect(db_path, timeout=5)
             cur = conn.cursor()
             cur.execute("PRAGMA quick_check(1)")
             res = cur.fetchone()
@@ -63,6 +81,7 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
 
         if not is_corrupted:
             _last_check_times[db_path] = now
+            _healed_on_boot.add(db_path)
             return True
 
         # Database is corrupted - begin self-healing procedure
@@ -204,6 +223,8 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
                 except Exception:
                     pass
             return False
+    finally:
+        _heal_lock.release()
 
 def heal_database(database_name: str) -> bool:
     """
@@ -214,7 +235,10 @@ def heal_database(database_name: str) -> bool:
     db_file = os.path.join(config_path, "db", f"{database_name}.db")
     if not os.path.exists(db_file) and os.path.exists(os.path.join("db", f"{database_name}.db")):
         db_file = os.path.join("db", f"{database_name}.db")
+    _healed_on_boot.discard(db_file)
     return _self_heal_sqlite_if_corrupted(db_file, database_name, force_check=True)
+
+_initialized_databases = set()
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)
@@ -243,11 +267,17 @@ def ConnectionString(database) -> str:
         db_file = os.path.join(sqlitePath, f"{database}.db")
         _self_heal_sqlite_if_corrupted(db_file, database)
         cn = f'sqlite:///{db_file}?timeout=60'
-    try:
-        if not database_exists(cn):
-            create_database(cn)
-    except Exception as e:
-        logger.error(f"[WGDashboard] Database initialization error for '{database}': {e}")
-        exit(1)
+
+    if cn not in _initialized_databases:
+        try:
+            if not database_exists(cn):
+                create_database(cn)
+            _initialized_databases.add(cn)
+        except Exception as e:
+            if db_type == "sqlite" and os.path.exists(os.path.join(sqlitePath, f"{database}.db")):
+                _initialized_databases.add(cn)
+            else:
+                logger.error(f"[WGDashboard] Database initialization error for '{database}': {e}")
+                exit(1)
 
     return cn

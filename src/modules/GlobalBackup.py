@@ -53,16 +53,16 @@ GLOBAL_BACKUP_DIR = os.getenv('GLOBAL_BACKUP_PATH', os.path.join(os.getenv('CONF
 # ─── Restore Job Tracking ────────────────────────────────────────────────────
 # Thread-safe dict: { job_id: {pct, step, done, error, created_at} }
 _restore_jobs: dict = {}
-_restore_jobs_lock = threading.Lock()
+_restore_jobs_lock = threading.RLock()
 
 # ─── Backup Job Tracking ─────────────────────────────────────────────────────
 # Thread-safe dict: { job_id: {pct, step, done, error, created_at} }
 _backup_jobs: dict = {}
-_backup_jobs_lock = threading.Lock()
+_backup_jobs_lock = threading.RLock()
 
 # Global state to prevent concurrent backup executions
 _is_backup_running = False
-_is_backup_running_lock = threading.Lock()
+_is_backup_running_lock = threading.RLock()
 
 JOB_TTL_SECONDS = 300  # پاکسازی job ها بعد از ۵ دقیقه از اتمام
 

@@ -489,7 +489,12 @@ gunicorn_stop () {
 		sudo systemctl stop wg-dashboard 2>/dev/null || true
 	fi
 
-	pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+	if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
+		sleep 1
+		if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
+			pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+		fi
+	fi
 	fuser -k 10086/tcp 2>/dev/null || true
 	sudo rm -f "$PID_FILE"
 	

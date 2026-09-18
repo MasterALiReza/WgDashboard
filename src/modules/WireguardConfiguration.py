@@ -683,6 +683,16 @@ class WireguardConfiguration:
                             )
                 except Exception as db_err:
                     current_app.logger.error(f"Database insert error during addPeers for {self.Name}: {db_err}", exc_info=True)
+                    # Check if error is due to database corruption (malformed / disk image)
+                    err_msg = str(db_err).lower()
+                    if "malformed" in err_msg or "disk image" in err_msg or "corrupt" in err_msg:
+                        try:
+                            from .DatabaseConnection import heal_database
+                            current_app.logger.warning(f"Detected SQLite corruption during addPeers. Attempting emergency self-healing for wgdashboard...")
+                            heal_database("wgdashboard")
+                        except Exception as heal_ex:
+                            current_app.logger.error(f"Emergency self-healing failed: {heal_ex}")
+
                     # Rollback kernel
                     for applied_id in applied_keys_to_kernel:
                         try:

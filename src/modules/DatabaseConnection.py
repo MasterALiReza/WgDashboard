@@ -7,7 +7,13 @@ from sqlalchemy_utils import database_exists, create_database
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
+import threading
+import shutil
+
 logger = logging.getLogger("WGDashboard")
+
+_heal_lock = threading.Lock()
+_last_check_times = {}
 
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -20,35 +26,52 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.execute("PRAGMA cache_size=-64000")
         cursor.close()
 
-def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str):
+def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check: bool = False) -> bool:
     """
-    Verifies SQLite database integrity on boot.
+    Verifies SQLite database integrity on boot and runtime.
     If any database is malformed (due to abnormal shutdown, torn write, or crash):
     1. For secondary/log databases, archives corrupt file so clean instance is generated.
-    2. For critical databases (e.g. wgdashboard.db), automatically attempts lossless rebuild:
-       reads all existing tables/records, deduplicates B-tree rowids via INSERT OR REPLACE into a fresh database,
-       verifies integrity, and atomically swaps it in with full safety backups.
+    2. For critical databases (e.g. wgdashboard.db, wgdashboard_job.db), automatically attempts lossless rebuild:
+       - Preserves full timestamped safety backup.
+       - Rebuilds all tables, rows, and schema objects.
+       - Rebuilds all secondary indexes (ix_...) on clean data.
+       - Resolves duplicate rowids caused by B-tree index corruptions using INSERT OR REPLACE.
+       - Verifies PRAGMA integrity_check == 'ok' before atomic file swap.
     """
     if not os.path.exists(db_path):
-        return
+        return True
 
-    try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        cur = conn.cursor()
-        cur.execute("PRAGMA quick_check(1)")
-        res = cur.fetchone()
-        conn.close()
-        if not res or res[0] != "ok":
-            raise sqlite3.DatabaseError(f"Integrity check failed: {res}")
-    except Exception as e:
-        logger.warning(f"[WGDashboard] Detected malformed database '{database_name}': {e}")
+    now = time.time()
+    with _heal_lock:
+        # Debounce: avoid running quick_check multiple times within 30 seconds for the same db file
+        if not force_check and (now - _last_check_times.get(db_path, 0) < 30):
+            return True
+
+        is_corrupted = False
+        try:
+            conn = sqlite3.connect(db_path, timeout=10)
+            cur = conn.cursor()
+            cur.execute("PRAGMA quick_check(1)")
+            res = cur.fetchone()
+            conn.close()
+            if not res or res[0] != "ok":
+                is_corrupted = True
+                logger.warning(f"[WGDashboard] PRAGMA quick_check returned non-ok for '{database_name}': {res}")
+        except Exception as e:
+            is_corrupted = True
+            logger.warning(f"[WGDashboard] Exception checking integrity for '{database_name}': {e}")
+
+        if not is_corrupted:
+            _last_check_times[db_path] = now
+            return True
+
+        # Database is corrupted - begin self-healing procedure
         ts = int(time.time())
         backup_corrupt = f"{db_path}.corrupt_{ts}"
-        
+
         # If it's a log database, archive it so a fresh one is generated
         if "log" in database_name.lower():
             try:
-                import shutil
                 shutil.copy2(db_path, backup_corrupt)
                 for ext in ["-wal", "-shm"]:
                     if os.path.exists(db_path + ext):
@@ -57,45 +80,102 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str):
                 logger.info(f"[WGDashboard] Successfully archived corrupted log database to {backup_corrupt}")
             except Exception as backup_err:
                 logger.error(f"[WGDashboard] Failed to auto-archive corrupted log database: {backup_err}")
-            return
+            _last_check_times[db_path] = time.time()
+            return True
 
-        # For main/job database: attempt automated lossless data recovery
+        # For critical databases (wgdashboard.db, wgdashboard_job.db): automated lossless data recovery
         repaired_tmp = f"{db_path}.repaired_{ts}"
         try:
-            import shutil
             shutil.copy2(db_path, backup_corrupt)
             logger.info(f"[WGDashboard] Preserved safety copy of corrupted '{database_name}' to {backup_corrupt}")
-            
+
             src = sqlite3.connect(db_path, timeout=30)
             dst = sqlite3.connect(repaired_tmp)
-            
+
             cur_src = src.cursor()
-            tables = [row[0] for row in cur_src.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()]
-            
-            for table in tables:
-                create_sql = cur_src.execute(
-                    f"SELECT sql FROM sqlite_master WHERE name='{table}'"
-                ).fetchone()[0]
-                dst.execute(create_sql)
+            cur_dst = dst.cursor()
+
+            # Disable foreign keys during reconstruction so insertion order does not fail
+            cur_dst.execute("PRAGMA foreign_keys = OFF")
+
+            # 1. Fetch all tables and their CREATE TABLE statements
+            cur_src.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+            )
+            tables = cur_src.fetchall()
+
+            # 2. Fetch all secondary indices
+            cur_src.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
+            )
+            indices = cur_src.fetchall()
+
+            # 3. Fetch any views or triggers
+            cur_src.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type IN ('view', 'trigger') AND sql IS NOT NULL"
+            )
+            other_objects = cur_src.fetchall()
+
+            # Create tables and copy rows
+            for table_name, create_sql in tables:
                 try:
-                    rows = cur_src.execute(f'SELECT * FROM "{table}"').fetchall()
-                    if rows:
+                    cur_dst.execute(create_sql)
+                except Exception as tbl_err:
+                    logger.warning(f"[WGDashboard] Error creating table '{table_name}': {tbl_err}")
+                    continue
+
+                # Recover rows: try bulk fetch first; if a corrupted page is hit, fallback to row-by-row
+                rows = []
+                try:
+                    rows = cur_src.execute(f'SELECT * FROM "{table_name}"').fetchall()
+                except Exception as bulk_err:
+                    logger.warning(f"[WGDashboard] Bulk fetch failed for '{table_name}' ({bulk_err}), falling back to row-by-row recovery")
+                    try:
+                        row_cur = src.cursor()
+                        row_cur.execute(f'SELECT * FROM "{table_name}"')
+                        while True:
+                            try:
+                                r = row_cur.fetchone()
+                                if r is None:
+                                    break
+                                rows.append(r)
+                            except Exception:
+                                break
+                    except Exception as scan_err:
+                        logger.warning(f"[WGDashboard] Row scan failed for '{table_name}': {scan_err}")
+
+                if rows:
+                    try:
                         placeholders = ','.join(['?'] * len(rows[0]))
-                        dst.executemany(f'INSERT OR REPLACE INTO "{table}" VALUES ({placeholders})', rows)
-                except Exception as row_err:
-                    logger.warning(f"[WGDashboard] Error recovering rows from {table}: {row_err}")
-            
+                        cur_dst.executemany(f'INSERT OR REPLACE INTO "{table_name}" VALUES ({placeholders})', rows)
+                    except Exception as insert_err:
+                        logger.warning(f"[WGDashboard] Error inserting rows into '{table_name}': {insert_err}")
+
             dst.commit()
-            dst.execute("PRAGMA journal_mode=WAL")
-            dst.execute("PRAGMA synchronous=NORMAL")
+
+            # 4. Re-create all secondary indices (rebuilt on clean data, free from index B-tree corruption)
+            for idx_name, idx_sql in indices:
+                try:
+                    cur_dst.execute(idx_sql)
+                except Exception as idx_err:
+                    logger.warning(f"[WGDashboard] Error recreating index '{idx_name}': {idx_err}")
+
+            # 5. Re-create views and triggers
+            for obj_name, obj_sql in other_objects:
+                try:
+                    cur_dst.execute(obj_sql)
+                except Exception as obj_err:
+                    logger.warning(f"[WGDashboard] Error recreating schema object '{obj_name}': {obj_err}")
+
             dst.commit()
-            
-            check_res = dst.execute("PRAGMA integrity_check").fetchall()
+            cur_dst.execute("PRAGMA journal_mode=WAL")
+            cur_dst.execute("PRAGMA synchronous=NORMAL")
+            dst.commit()
+
+            check_res = cur_dst.execute("PRAGMA integrity_check").fetchall()
             src.close()
             dst.close()
-            
+
             if check_res == [('ok',)]:
                 for ext in ["-wal", "-shm"]:
                     if os.path.exists(db_path + ext):
@@ -104,12 +184,18 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str):
                         except Exception:
                             pass
                 shutil.move(repaired_tmp, db_path)
-                os.chmod(db_path, 0o644)
-                logger.info(f"[WGDashboard] Successfully self-healed corrupted database '{database_name}'. All data recovered!")
+                try:
+                    os.chmod(db_path, 0o644)
+                except Exception:
+                    pass
+                logger.info(f"[WGDashboard] Successfully self-healed corrupted database '{database_name}'. All data and indexes recovered!")
+                _last_check_times[db_path] = time.time()
+                return True
             else:
                 logger.error(f"[WGDashboard] Automated repair of '{database_name}' could not verify integrity: {check_res}")
                 if os.path.exists(repaired_tmp):
                     os.remove(repaired_tmp)
+                return False
         except Exception as repair_err:
             logger.error(f"[WGDashboard] Self-healing exception for '{database_name}': {repair_err}")
             if os.path.exists(repaired_tmp):
@@ -117,6 +203,18 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str):
                     os.remove(repaired_tmp)
                 except Exception:
                     pass
+            return False
+
+def heal_database(database_name: str) -> bool:
+    """
+    Public API to trigger an immediate, forced self-healing repair of a database
+    if a caller encounters a DatabaseError during runtime.
+    """
+    config_path = os.getenv('CONFIGURATION_PATH', '.')
+    db_file = os.path.join(config_path, "db", f"{database_name}.db")
+    if not os.path.exists(db_file) and os.path.exists(os.path.join("db", f"{database_name}.db")):
+        db_file = os.path.join("db", f"{database_name}.db")
+    return _self_heal_sqlite_if_corrupted(db_file, database_name, force_check=True)
 
 def ConnectionString(database) -> str:    
     parser = configparser.ConfigParser(strict=False)

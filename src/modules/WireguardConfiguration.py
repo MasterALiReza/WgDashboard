@@ -682,14 +682,14 @@ class WireguardConfiguration:
                                 self.peersTable.insert().values(newPeer)
                             )
                 except Exception as db_err:
-                    current_app.logger.error(f"Database insert error during addPeers: {db_err}")
+                    current_app.logger.error(f"Database insert error during addPeers for {self.Name}: {db_err}", exc_info=True)
                     # Rollback kernel
                     for applied_id in applied_keys_to_kernel:
                         try:
                             subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
                         except Exception:
                             pass
-                    return False, [], "Failed to save peer records in database"
+                    return False, [], f"Failed to save peer records in database: {db_err}"
 
                 # Phase 3: Persist consistent state to .conf file
                 self.__wgSave()

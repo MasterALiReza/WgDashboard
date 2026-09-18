@@ -426,7 +426,13 @@ gunicorn_start () {
   ulimit -n 65535 2>/dev/null || true
   
   # Ensure no orphaned gunicorn process is holding the port before starting
-  pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+  if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
+    pkill -TERM -f "gunicorn.*dashboard:app" 2>/dev/null || true
+    sleep 2
+    if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
+      pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+    fi
+  fi
   fuser -k 10086/tcp 2>/dev/null || true
   rm -f "$PID_FILE"
 
@@ -462,11 +468,10 @@ gunicorn_stop () {
 
 	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 		printf "[WGDashboard] Stopping WGDashboard w/ Gunicorn on PID %s" "$pid"
-		pkill -P "$pid" 2>/dev/null || true
-		sudo kill "$pid" 2>/dev/null || true
+		sudo kill -TERM "$pid" 2>/dev/null || true
 		
 		local count=0
-		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 10 ]; do
+		while ( kill -0 "$pid" 2>/dev/null || [ -f "$PID_FILE" ] ) && [ $count -lt 15 ]; do
 			printf "."
 			sleep 1
 			count=$((count+1))

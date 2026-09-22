@@ -244,9 +244,9 @@ class Peer:
                 if hasattr(self.configuration, "peerShareLinksTable") and self.configuration.peerShareLinksTable is not None:
                     conn.execute(
                         self.configuration.peerShareLinksTable.update().values({
-                            "peer_id": new_pub
+                            "Peer": new_pub
                         }).where(
-                            self.configuration.peerShareLinksTable.c.peer_id == old_id
+                            self.configuration.peerShareLinksTable.c.Peer == old_id
                         )
                     )
 

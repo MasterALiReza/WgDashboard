@@ -14,7 +14,7 @@ import sqlalchemy as db
 from .PeerJob import PeerJob
 from  flask import current_app
 from .PeerShareLink import PeerShareLink
-from .Utilities import GenerateWireguardPublicKey, CheckAddress, ValidateDNSAddress
+from .Utilities import GenerateWireguardPublicKey, GenerateWireguardPrivateKey, CheckAddress, ValidateDNSAddress
 
 
 class Peer:
@@ -182,7 +182,97 @@ class Peer:
             if not was_running and self.configuration.getStatus():
                 self.configuration.toggleConfiguration()
 
+    def autoHealKeys(self) -> bool:
+        """
+        Auto-generates a valid WireGuard keypair for a peer that has no private key,
+        updates the WireGuard kernel peer, updates the database, and saves the configuration.
+        """
+        try:
+            priv_status, new_priv = GenerateWireguardPrivateKey()
+            if not priv_status or not new_priv:
+                return False
+            pub_status, new_pub = GenerateWireguardPublicKey(new_priv)
+            if not pub_status or not new_pub:
+                return False
+
+            old_id = self.id
+            # If interface is active, update wireguard kernel
+            if self.configuration.getStatus():
+                cmd_remove = [self.configuration.Protocol, "set", self.configuration.Name, "peer", old_id, "remove"]
+                subprocess.run(cmd_remove, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+                rand = random.Random()
+                uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
+                psk_exist = bool(self.preshared_key and len(str(self.preshared_key).strip()) > 0)
+                try:
+                    if psk_exist:
+                        with open(uid, "w") as f:
+                            f.write(str(self.preshared_key).strip())
+                    clean_allowed_ips = (self.allowed_ip or "").replace(" ", "")
+                    cmd_add = [
+                        self.configuration.Protocol, "set", self.configuration.Name,
+                        "peer", new_pub,
+                        "allowed-ips", clean_allowed_ips,
+                        "preshared-key", uid if psk_exist else "/dev/null"
+                    ]
+                    if self.keepalive and int(self.keepalive) > 0:
+                        cmd_add.extend(["persistent-keepalive", str(self.keepalive)])
+                    subprocess.run(cmd_add, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                finally:
+                    if psk_exist and os.path.exists(uid):
+                        try:
+                            os.remove(uid)
+                        except Exception:
+                            pass
+
+                # Save configuration
+                try:
+                    self.configuration.saveConfiguration()
+                except Exception as save_err:
+                    current_app.logger.warning(f"Failed to save configuration during autoHealKeys: {save_err}")
+
+            # Update database
+            with self.configuration.engine.begin() as conn:
+                conn.execute(
+                    self.configuration.peersTable.update().values({
+                        "id": new_pub,
+                        "private_key": new_priv
+                    }).where(
+                        self.configuration.peersTable.c.id == old_id
+                    )
+                )
+                if hasattr(self.configuration, "peerShareLinksTable") and self.configuration.peerShareLinksTable is not None:
+                    conn.execute(
+                        self.configuration.peerShareLinksTable.update().values({
+                            "peer_id": new_pub
+                        }).where(
+                            self.configuration.peerShareLinksTable.c.peer_id == old_id
+                        )
+                    )
+
+            self.id = new_pub
+            self.private_key = new_priv
+            if hasattr(self.configuration, '_peers_dict') and self.configuration._peers_dict is not None:
+                self.configuration._peers_dict.pop(old_id, None)
+                self.configuration._peers_dict[new_pub] = self
+
+            current_app.logger.info(f"Successfully auto-healed keys for peer {old_id} -> {new_pub}")
+            return True
+        except Exception as err:
+            current_app.logger.error(f"Error in autoHealKeys for peer {self.id}: {err}", exc_info=True)
+            return False
+
     def downloadPeer(self) -> dict[str, str]:
+        # If private key is missing, attempt auto-heal for never-connected peers
+        if not self.private_key or len(str(self.private_key).strip()) == 0:
+            has_no_traffic = (
+                (self.latest_handshake in ("No Handshake", "N/A", "", "0", None)) and
+                (getattr(self, "total_receive", 0) or 0) == 0 and
+                (getattr(self, "total_sent", 0) or 0) == 0
+            )
+            if has_no_traffic:
+                self.autoHealKeys()
+
         final = {
             "fileName": "",
             "file": ""
@@ -205,7 +295,7 @@ class Peer:
                 final["fileName"] += i
 
         interfaceSection = {
-            "PrivateKey": self.private_key,
+            "PrivateKey": self.private_key if self.private_key and len(str(self.private_key).strip()) > 0 else None,
             "Address": self.allowed_ip,
             "MTU": (
                 self.configuration.configurationInfo.OverridePeerSettings.MTU
@@ -216,6 +306,10 @@ class Peer:
                     if self.configuration.configurationInfo.OverridePeerSettings.DNS else self.DNS
             )
         }
+
+        if not self.private_key or len(str(self.private_key).strip()) == 0:
+            interfaceSection["# PrivateKey"] = "<INSERT_CLIENT_PRIVATE_KEY_HERE> (Required by WireGuard)"
+            final["warning"] = "PrivateKey was not stored on the server (client-side keypair)."
 
         if self.configuration.Protocol == "awg":
             interfaceSection.update({

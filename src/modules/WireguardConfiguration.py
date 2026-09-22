@@ -64,7 +64,7 @@ class WireguardConfiguration:
         self.PostUp: str = ""
         self.PreDown: str = ""
         self.PostDown: str = ""
-        self.SaveConfig: bool = True
+        self.SaveConfig: bool = False
         self.Name = name
         self.Protocol = "wg" if wg else "awg"
         self.AllPeerJobs = AllPeerJobs
@@ -112,7 +112,7 @@ class WireguardConfiguration:
                 "PreDown": f"{self.PreDown}",
                 "PostUp": f"{self.PostUp}",
                 "PostDown": f"{self.PostDown}",
-                "SaveConfig": "true"
+                "SaveConfig": "false"
             }
 
             if self.Protocol == 'awg':
@@ -173,6 +173,7 @@ class WireguardConfiguration:
         self.Peers: list[Peer] = []
         self.getPeers()
         self.getRestrictedPeersList()
+        self.healPeersWithMissingPrivateKeys()
 
     def getRawConfigurationFile(self):
         return open(self.configPath, 'r').read()
@@ -521,6 +522,30 @@ class WireguardConfiguration:
             for i in existingPeers:
                 tmpList.append(cls(i, self))
         self.Peers = tmpList
+    
+    def healPeersWithMissingPrivateKeys(self) -> int:
+        """
+        Scans all peers in this configuration that have no private key and have never
+        had any traffic / handshake. Automatically heals their keypairs so downloaded configs are valid.
+        """
+        healed_count = 0
+        try:
+            for p in list(self.Peers):
+                if not p.private_key or len(str(p.private_key).strip()) == 0:
+                    has_no_traffic = (
+                        (p.latest_handshake in ("No Handshake", "N/A", "", "0", None)) and
+                        (getattr(p, "total_receive", 0) or 0) == 0 and
+                        (getattr(p, "total_sent", 0) or 0) == 0
+                    )
+                    if has_no_traffic:
+                        if hasattr(p, "autoHealKeys") and p.autoHealKeys():
+                            healed_count += 1
+            if healed_count > 0:
+                current_app.logger.info(f"Healed {healed_count} peers with missing private keys for interface {self.Name}")
+        except Exception as e:
+            current_app.logger.error(f"Error in healPeersWithMissingPrivateKeys for {self.Name}: {e}", exc_info=True)
+        return healed_count
+
     
     def logPeersTraffic(self):
         inserts = []
@@ -1172,6 +1197,23 @@ class WireguardConfiguration:
         try:
             command = [f"{self.Protocol}-quick", "save", self.Name]
             subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+            # Post-save sanitization: Ensure SaveConfig is false and strip any ephemeral reverse-proxy localhost endpoints
+            if os.path.exists(self.configPath):
+                try:
+                    with open(self.configPath, 'r', encoding='utf-8', errors='ignore') as f:
+                        lines = f.readlines()
+                    cleaned = []
+                    for line in lines:
+                        if re.match(r'^\s*SaveConfig\s*=', line, re.IGNORECASE):
+                            cleaned.append("SaveConfig = false\n")
+                        elif re.match(r'^\s*Endpoint\s*=\s*127\.0\.0\.1:', line):
+                            continue
+                        else:
+                            cleaned.append(line)
+                    with open(self.configPath, 'w', encoding='utf-8') as f:
+                        f.writelines(cleaned)
+                except Exception as clean_err:
+                    current_app.logger.warning(f"Failed post-save sanitization for {self.Name}: {clean_err}")
             return True
         except Exception as e:
             current_app.logger.error(f"Failed to process {self.Protocol}-quick save command:\n{str(e)}")

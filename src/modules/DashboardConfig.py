@@ -196,11 +196,25 @@ class DashboardConfig:
                     db.or_(self.apiKeyTable.columns.ExpiredAt.is_(None), self.apiKeyTable.columns.ExpiredAt > datetime.now())
                 )).fetchall()
                 fKeys = []
+                def _fmt_dt(val):
+                    if val is None:
+                        return None
+                    if hasattr(val, 'strftime'):
+                        return val.strftime("%Y-%m-%d %H:%M:%S")
+                    return str(val)
+
                 for k in keys:
-                    fKeys.append(DashboardAPIKey(k[0], k[1].strftime("%Y-%m-%d %H:%M:%S"), (k[2].strftime("%Y-%m-%d %H:%M:%S") if k[2] else None)))
+                    fKeys.append(DashboardAPIKey(k[0], _fmt_dt(k[1]), _fmt_dt(k[2])))
                 return fKeys
         except Exception as e:
-            current_app.logger.error(f"API Keys error: {e}")
+            try:
+                if current_app:
+                    current_app.logger.error(f"API Keys error: {e}")
+                else:
+                    import logging
+                    logging.getLogger("WGDashboard").error(f"API Keys error: {e}")
+            except Exception:
+                pass
         return []
 
     def createAPIKeys(self, ExpiredAt = None):

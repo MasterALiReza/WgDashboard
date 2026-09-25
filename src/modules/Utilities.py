@@ -42,61 +42,103 @@ def StringToBoolean(value: str):
             ("yes", "true", "t", "1", 1))
 
 def CheckAddress(ips_str: str) -> bool:
-    if len(ips_str) == 0:
+    if not isinstance(ips_str, str) or len(ips_str.strip()) == 0:
         return False
 
     for ip in ips_str.split(','):
         stripped_ip = ip.strip()
-        if '.' not in stripped_ip and ':' not in stripped_ip:
+        if not stripped_ip or ('.' not in stripped_ip and ':' not in stripped_ip):
             return False
         try:
             # Verify the IP-address, with the strict flag as false also allows for /32 and /128
             ipaddress.ip_network(stripped_ip, strict=False)
-        except ValueError:
+        except (ValueError, TypeError):
             return False
     return True
 
 def CheckPeerKey(peer_key: str) -> bool:
-    return re.match(r"^[A-Za-z0-9+/]{43}=$", peer_key)
+    if not isinstance(peer_key, str) or not peer_key.strip():
+        return False
+    return bool(re.match(r"^[A-Za-z0-9+/]{43}=$", peer_key.strip()))
 
 def ValidateDNSAddress(addresses_str: str) -> tuple[bool, str | None]:
-    if len(addresses_str) == 0:
+    if not isinstance(addresses_str, str) or len(addresses_str.strip()) == 0:
         return False, "Got an empty list/string to check for valid DNS-addresses"
 
     addresses = addresses_str.split(',')
     for address in addresses:
         stripped_address = address.strip()
-
-        if not CheckAddress(stripped_address) and not RegexMatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z]{0,61}[a-z]", stripped_address):
+        if not stripped_address:
+            continue
+        if not CheckAddress(stripped_address) and not RegexMatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z]{0,61}[a-z]", stripped_address.lower()):
             return False, f"{stripped_address} does not appear to be a valid IP-address or FQDN"
 
     return True, None
 
 
 def ValidateEndpointAllowedIPs(IPs) -> tuple[bool, str] | tuple[bool, None]:
+    if not isinstance(IPs, str) or not IPs.strip():
+        return False, "Empty endpoint allowed IPs"
     ips = IPs.replace(" ", "").split(",")
     for ip in ips:
+        if not ip:
+            continue
         try:
             ipaddress.ip_network(ip, strict=False)
-        except ValueError as e:
+        except (ValueError, TypeError) as e:
             return False, str(e)
     return True, None
 
-def GenerateWireguardPublicKey(privateKey: str) -> tuple[bool, str] | tuple[bool, None]:
+def _fallback_x25519_genkey() -> tuple[bool, str] | tuple[bool, None]:
     try:
-        publicKey = subprocess.check_output(["wg", "pubkey"], input=privateKey.encode(),
-                                            stderr=subprocess.STDOUT, timeout=10)
-        return True, publicKey.decode().strip('\n')
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        import base64
+        from cryptography.hazmat.primitives.asymmetric import x25519
+        from cryptography.hazmat.primitives import serialization
+        priv = x25519.X25519PrivateKey.generate()
+        priv_bytes = priv.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        return True, base64.b64encode(priv_bytes).decode('ascii')
+    except Exception:
         return False, None
+
+def _fallback_x25519_pubkey(privateKey: str) -> tuple[bool, str] | tuple[bool, None]:
+    try:
+        import base64
+        from cryptography.hazmat.primitives.asymmetric import x25519
+        from cryptography.hazmat.primitives import serialization
+        priv_bytes = base64.b64decode(privateKey.strip())
+        if len(priv_bytes) != 32:
+            return False, None
+        priv = x25519.X25519PrivateKey.from_private_bytes(priv_bytes)
+        pub = priv.public_key()
+        pub_bytes = pub.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        )
+        return True, base64.b64encode(pub_bytes).decode('ascii')
+    except Exception:
+        return False, None
+
+def GenerateWireguardPublicKey(privateKey: str) -> tuple[bool, str] | tuple[bool, None]:
+    if not isinstance(privateKey, str) or not privateKey.strip():
+        return False, None
+    try:
+        publicKey = subprocess.check_output(["wg", "pubkey"], input=privateKey.strip().encode(),
+                                            stderr=subprocess.STDOUT, timeout=10)
+        return True, publicKey.decode().strip()
+    except Exception:
+        return _fallback_x25519_pubkey(privateKey)
     
 def GenerateWireguardPrivateKey() -> tuple[bool, str] | tuple[bool, None]:
     try:
         publicKey = subprocess.check_output(["wg", "genkey"],
                                             stderr=subprocess.STDOUT, timeout=10)
-        return True, publicKey.decode().strip('\n')
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False, None
+        return True, publicKey.decode().strip()
+    except Exception:
+        return _fallback_x25519_genkey()
     
 def ValidatePasswordStrength(password: str) -> tuple[bool, str] | tuple[bool, None]:
     # Rules:

@@ -137,12 +137,14 @@ class DashboardClientsPeerAssignment:
                           e.ClientID == ClientID, self.assignments)
         
         for a in assigned:
-            peer = filter(lambda e : e.id == a.PeerID, 
-                          self.wireguardConfigurations[a.ConfigurationName].Peers)
+            if a.ConfigurationName not in self.wireguardConfigurations:
+                continue
+            config = self.wireguardConfigurations[a.ConfigurationName]
+            peer = filter(lambda e : e.id == a.PeerID, config.Peers)
             for p in peer:
                 peers.append({
                     'assignment_id': a.AssignmentID,
-                    'protocol': self.wireguardConfigurations[a.ConfigurationName].Protocol,
+                    'protocol': config.Protocol,
                     'id': p.id,
                     'private_key': p.private_key,
                     'name': p.name,

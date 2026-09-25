@@ -1552,9 +1552,16 @@ class WireguardConfiguration:
         محاسبه ترافیک اینترفیس مستقیم از DB — هرگز از self.Peers استفاده نمی‌کند.
         این متد atomic و thread-safe است چون فقط DB query می‌زند.
         در صورت بروز خطای موقت DB، از نسخه قبلی ذخیره‌شده استفاده می‌کند تا ترافیک روی صفر قرار نگیرد.
+        دارای کش کوتاه‌مدت ۳ ثانیه‌ای برای جلوگیری از بار سنگین SQLite روی درخواست‌های پی‌درپی.
         """
         if not hasattr(self, '_last_data_usage'):
             self._last_data_usage = {"Total": 0.0, "Sent": 0.0, "Receive": 0.0}
+        if not hasattr(self, '_last_data_usage_time'):
+            self._last_data_usage_time = 0.0
+
+        now = time.time()
+        if (now - self._last_data_usage_time < 3.0) and self._last_data_usage.get("Total", 0.0) > 0:
+            return self._last_data_usage
 
         try:
             with self.engine.connect() as conn:
@@ -1602,6 +1609,7 @@ class WireguardConfiguration:
             }
             if res["Total"] > 0:
                 self._last_data_usage = res
+                self._last_data_usage_time = now
             elif self._last_data_usage.get("Total", 0) > 0 and res["Total"] == 0:
                 return self._last_data_usage
             return res

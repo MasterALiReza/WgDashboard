@@ -1325,8 +1325,10 @@ def API_sharePeer_get():
     fp, p = c.searchPeer(l.Peer)
     if not fp:
         return ResponseObject(False, "The peer you're looking for does not exist")
-    
-    return ResponseObject(data=p.downloadPeer())
+    dl = p.downloadPeer()
+    if dl.get("error"):
+        return ResponseObject(False, dl["error"], data=dl)
+    return ResponseObject(data=dl)
     
 @app.post(f'{APP_PREFIX}/api/allowAccessPeers/<configName>')
 def API_allowAccessPeers(configName: str) -> ResponseObject:
@@ -1513,7 +1515,10 @@ def API_downloadPeer(configName):
     peerFound, peer = configuration.searchPeer(data['id'])
     if len(data['id']) == 0 or not peerFound:
         return ResponseObject(False, "Peer does not exist")
-    return ResponseObject(data=peer.downloadPeer())
+    dl = peer.downloadPeer()
+    if dl.get("error"):
+        return ResponseObject(False, dl["error"], data=dl)
+    return ResponseObject(data=dl)
 
 @app.get(f"{APP_PREFIX}/api/downloadAllPeers/<configName>")
 def API_downloadAllPeers(configName):
@@ -1524,6 +1529,8 @@ def API_downloadAllPeers(configName):
     untitledPeer = 0
     for i in configuration.Peers:
         file = i.downloadPeer()
+        if file.get("error"):
+            continue
         if file["fileName"] == "UntitledPeer":
             file["fileName"] = str(untitledPeer) + "_" + file["fileName"]
             untitledPeer += 1

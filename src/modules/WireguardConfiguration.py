@@ -11,6 +11,19 @@ from zipfile import ZipFile
 from datetime import datetime, timedelta
 from itertools import islice
 from flask import current_app
+import logging
+_wgd_fallback_logger = logging.getLogger("WGDashboard")
+
+class _ContextSafeLoggerProxy:
+    def __getattr__(self, name):
+        try:
+            if current_app:
+                return getattr(current_app.logger, name)
+        except Exception:
+            pass
+        return getattr(_wgd_fallback_logger, name)
+
+_logger = _ContextSafeLoggerProxy()
 
 from .DatabaseConnection import ConnectionString
 from .DashboardConfig import DashboardConfig
@@ -19,6 +32,7 @@ from .PeerJobs import PeerJobs
 from .PeerShareLinks import PeerShareLinks
 from .Utilities import StringToBoolean, \
     GenerateWireguardPublicKey, \
+    GenerateWireguardPrivateKey, \
     RegexMatch, \
     ValidateDNSAddress, \
     ValidateEndpointAllowedIPs, \
@@ -138,20 +152,20 @@ class WireguardConfiguration:
                 self.createDatabase()
                 with open(self.configPath, "w+") as configFile:
                     self.__parser.write(configFile)
-                    current_app.logger.info(f"Configuration file {self.configPath} created")
+                    _logger.info(f"Configuration file {self.configPath} created")
                 self.__initPeersList()
 
         if not os.path.exists(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup')):
             os.mkdir(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup'))
 
-        current_app.logger.info(f"Initialized Configuration: {name}")
+        _logger.info(f"Initialized Configuration: {name}")
         self.__dumpDatabase()
         if self.getAutostartStatus() and not self.getStatus() and startup:
             status, ext = self.toggleConfiguration()
             if not status:
-                current_app.logger.error(f"Failed to autostart configuration: {name}. Reason: {ext}")
+                _logger.error(f"Failed to autostart configuration: {name}. Reason: {ext}")
             else:
-                current_app.logger.info(f"Autostart Configuration: {name}")
+                _logger.info(f"Autostart Configuration: {name}")
             
         self.configurationInfo: WireguardConfigurationInfo | None = None
         configurationInfoJson = self.readConfigurationInfo()
@@ -192,7 +206,7 @@ class WireguardConfiguration:
         status, err = self.toggleConfiguration()
         if not status:
             restoreStatus = self.restoreBackup(backup['filename'])
-            current_app.logger.error(f"Backup restore status: {restoreStatus}")
+            _logger.error(f"Backup restore status: {restoreStatus}")
             self.toggleConfiguration()
             return False, err
         return True, None
@@ -250,7 +264,7 @@ class WireguardConfiguration:
                         )
                     )
         except Exception as e:
-            current_app.logger.error("Dropping table failed")
+            _logger.error("Dropping table failed")
             return False
         return True
 
@@ -375,7 +389,7 @@ class WireguardConfiguration:
                         if allowed_insert_pattern.match(l):
                             conn.execute(sqlalchemy.text(l))
                         else:
-                            current_app.logger.warning(f"Unsafe SQL line skipped during import: {l[:100]}")
+                            _logger.warning(f"Unsafe SQL line skipped during import: {l[:100]}")
         return True
 
     def __getPublicKey(self) -> str:
@@ -514,7 +528,7 @@ class WireguardConfiguration:
                                 )
                                 conn.execute(stmt, updates)
                 except Exception as e:
-                    current_app.logger.error(f"{self.Name} getPeers() Error: {e}")
+                    _logger.error(f"{self.Name} getPeers() Error: {e}")
         
         cls = getattr(self, 'peer_class', Peer)
         with self.engine.connect() as conn:
@@ -528,6 +542,9 @@ class WireguardConfiguration:
         Scans all peers in this configuration that have no private key and have never
         had any traffic / handshake. Automatically heals their keypairs so downloaded configs are valid.
         """
+        if getattr(self, '_is_healing', False):
+            return 0
+        self._is_healing = True
         healed_count = 0
         try:
             for p in list(self.Peers):
@@ -541,9 +558,11 @@ class WireguardConfiguration:
                         if hasattr(p, "autoHealKeys") and p.autoHealKeys():
                             healed_count += 1
             if healed_count > 0:
-                current_app.logger.info(f"Healed {healed_count} peers with missing private keys for interface {self.Name}")
+                _logger.info(f"Healed {healed_count} peers with missing private keys for interface {self.Name}")
         except Exception as e:
-            current_app.logger.error(f"Error in healPeersWithMissingPrivateKeys for {self.Name}: {e}", exc_info=True)
+            _logger.error(f"Error in healPeersWithMissingPrivateKeys for {self.Name}: {e}", exc_info=True)
+        finally:
+            self._is_healing = False
         return healed_count
 
     
@@ -611,7 +630,38 @@ class WireguardConfiguration:
 
                 cleanedAllowedIPs = {}
                 for p in peers:
-                    p['id'] = (p.get('id') or '').strip().replace(' ', '+')
+                    # Sanitize preshared_key
+                    psk = (p.get('preshared_key') or '').strip()
+                    if psk in ("None", "null", "(none)", "N/A"):
+                        psk = ""
+                    p['preshared_key'] = psk
+                    if psk and not CheckPeerKey(psk):
+                        return False, [], "Preshared key format is incorrect"
+
+                    # Ensure private_key and id (public_key) consistency
+                    priv = (p.get('private_key') or '').strip()
+                    pub = (p.get('id') or '').strip().replace(' ', '+')
+
+                    if priv:
+                        if not CheckPeerKey(priv):
+                            return False, [], "Private key format is incorrect"
+                        derived_pub_status, derived_pub = GenerateWireguardPublicKey(priv)
+                        if derived_pub_status and derived_pub:
+                            pub = derived_pub
+                        p['private_key'] = priv
+                        p['id'] = pub
+                    elif not pub:
+                        # Neither private key nor public key provided: auto-generate keypair
+                        gen_priv_status, new_priv = GenerateWireguardPrivateKey()
+                        if gen_priv_status and new_priv:
+                            gen_pub_status, new_pub = GenerateWireguardPublicKey(new_priv)
+                            if gen_pub_status and new_pub:
+                                p['private_key'] = new_priv
+                                p['id'] = new_pub
+                                pub = new_pub
+                    else:
+                        p['id'] = pub
+
                     newAllowedIPs = (p.get('allowed_ip') or '').replace(" ", "")
                     if not CheckAddress(newAllowedIPs):
                         return False, [], "Allowed IPs entry format is incorrect"
@@ -634,7 +684,7 @@ class WireguardConfiguration:
                                 if ip_clean and ip_clean != "N/A":
                                     used_allowed_ips.add(ip_clean)
                 except Exception as e:
-                    current_app.logger.warning(f"Failed to query DB for used allowed IPs: {e}")
+                    _logger.warning(f"Failed to query DB for used allowed IPs: {e}")
                     for existing_p in self.getPeersList():
                         for ip in (getattr(existing_p, 'allowed_ip', '') or '').split(','):
                             ip_clean = ip.strip()
@@ -651,7 +701,7 @@ class WireguardConfiguration:
                 applied_keys_to_kernel = []
                 try:
                     for p in peers:
-                        presharedKeyExist = len(p.get('preshared_key', '')) > 0
+                        presharedKeyExist = bool(p.get('preshared_key'))
                         rd = random.Random()
                         uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
                         try:
@@ -669,7 +719,7 @@ class WireguardConfiguration:
                                 except Exception:
                                     pass
                 except Exception as kernel_err:
-                    current_app.logger.error(f"Kernel apply error during addPeers: {kernel_err}")
+                    _logger.error(f"Kernel apply error during addPeers: {kernel_err}")
                     for applied_id in applied_keys_to_kernel:
                         try:
                             subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
@@ -707,16 +757,16 @@ class WireguardConfiguration:
                                 self.peersTable.insert().values(newPeer)
                             )
                 except Exception as db_err:
-                    current_app.logger.error(f"Database insert error during addPeers for {self.Name}: {db_err}", exc_info=True)
+                    _logger.error(f"Database insert error during addPeers for {self.Name}: {db_err}", exc_info=True)
                     # Check if error is due to database corruption (malformed / disk image)
                     err_msg = str(db_err).lower()
                     if "malformed" in err_msg or "disk image" in err_msg or "corrupt" in err_msg:
                         try:
                             from .DatabaseConnection import heal_database
-                            current_app.logger.warning(f"Detected SQLite corruption during addPeers. Attempting emergency self-healing for wgdashboard...")
+                            _logger.warning(f"Detected SQLite corruption during addPeers. Attempting emergency self-healing for wgdashboard...")
                             heal_database("wgdashboard")
                         except Exception as heal_ex:
-                            current_app.logger.error(f"Emergency self-healing failed: {heal_ex}")
+                            _logger.error(f"Emergency self-healing failed: {heal_ex}")
 
                     # Rollback kernel
                     for applied_id in applied_keys_to_kernel:
@@ -740,7 +790,7 @@ class WireguardConfiguration:
                     "peers": list(map(lambda k : k['id'], peers))
                 })
             except Exception as e:
-                current_app.logger.error(f"Add peers error: {e}")
+                _logger.error(f"Add peers error: {e}")
                 return False, [], "Internal server error"
             return True, result['peers'], ""
 
@@ -798,7 +848,7 @@ class WireguardConfiguration:
                     subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
                     successfully_applied_keys.append(restrictedPeer["id"])
                 except Exception as e:
-                    current_app.logger.error(f"Error applying WireGuard config for peer {restrictedPeer.get('id')}: {e}")
+                    _logger.error(f"Error applying WireGuard config for peer {restrictedPeer.get('id')}: {e}")
                     failed_count += 1
                 finally:
                     if presharedKeyExist and os.path.exists(uid):
@@ -862,7 +912,7 @@ class WireguardConfiguration:
                     subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
                     removed_peer_ids.append(pf.id)
                 except Exception as e:
-                    current_app.logger.error(f"Error removing peer {pf.id} from WireGuard runtime: {e}")
+                    _logger.error(f"Error removing peer {pf.id} from WireGuard runtime: {e}")
                     numOfFailedToRestrictPeers += 1
 
             # Step 3: Atomic, ultra-fast DB update
@@ -892,7 +942,7 @@ class WireguardConfiguration:
                         )
                         numOfRestrictedPeers += 1
                     except Exception as e:
-                        current_app.logger.error(f"DB update error restricting peer {peer_id}: {e}")
+                        _logger.error(f"DB update error restricting peer {peer_id}: {e}")
                         numOfFailedToRestrictPeers += 1
 
             if not self.__wgSave():
@@ -943,7 +993,7 @@ class WireguardConfiguration:
                                     is_restricted = True
                                     pf = type('PeerFallback', (), dict(row_r, jobs=[], ShareLink=[]))()
                     except Exception as e:
-                        current_app.logger.warning(f"Error checking DB for peer {p} during delete: {e}")
+                        _logger.warning(f"Error checking DB for peer {p} during delete: {e}")
 
                 if not found:
                     # Fallback for ghost/orphan keys: allow cleaning from kernel runtime and DB tables
@@ -1007,7 +1057,7 @@ class WireguardConfiguration:
                         batch_data += peer_total_data
                         valid_delete_ids.append(pf.id)
                     except Exception as e:
-                        current_app.logger.error(f"Error calculating stats for deleting peer {pf.id}: {e}")
+                        _logger.error(f"Error calculating stats for deleting peer {pf.id}: {e}")
                         numOfFailedToDeletePeers += 1
 
                 # Atomic snapshot update once for the entire batch
@@ -1031,7 +1081,7 @@ class WireguardConfiguration:
                         deleted.append(peer_id)
                         numOfDeletedPeers += 1
                     except Exception as e:
-                        current_app.logger.error(f"Error executing DB deletion for peer {peer_id}: {e}")
+                        _logger.error(f"Error executing DB deletion for peer {peer_id}: {e}")
                         numOfFailedToDeletePeers += 1
 
             if not self.__wgSave():
@@ -1153,9 +1203,9 @@ class WireguardConfiguration:
                         subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15)
                         results["repaired_peers"].append(pid_clean)
                         needs_save = True
-                        current_app.logger.info(f"Reconcile: successfully restored missing peer {pid_clean} to kernel for {self.Name}")
+                        _logger.info(f"Reconcile: successfully restored missing peer {pid_clean} to kernel for {self.Name}")
                     except Exception as err:
-                        current_app.logger.error(f"Reconcile: failed to restore peer {pid_clean}: {err}")
+                        _logger.error(f"Reconcile: failed to restore peer {pid_clean}: {err}")
                         results["errors"].append(f"Failed to restore peer {pid_clean}: {err}")
                     finally:
                         if psk_exist and os.path.exists(uid):
@@ -1172,9 +1222,9 @@ class WireguardConfiguration:
                         subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15)
                         results["restricted_removed"].append(pid)
                         needs_save = True
-                        current_app.logger.info(f"Reconcile: removed restricted peer {pid} from kernel for {self.Name}")
+                        _logger.info(f"Reconcile: removed restricted peer {pid} from kernel for {self.Name}")
                     except Exception as err:
-                        current_app.logger.error(f"Reconcile: failed to remove restricted peer {pid}: {err}")
+                        _logger.error(f"Reconcile: failed to remove restricted peer {pid}: {err}")
                         results["errors"].append(f"Failed to remove restricted peer {pid}: {err}")
 
             # 3. Detect orphan kernel peers (peers in kernel not in active or restricted DB)
@@ -1213,11 +1263,18 @@ class WireguardConfiguration:
                     with open(self.configPath, 'w', encoding='utf-8') as f:
                         f.writelines(cleaned)
                 except Exception as clean_err:
-                    current_app.logger.warning(f"Failed post-save sanitization for {self.Name}: {clean_err}")
+                    _logger.warning(f"Failed post-save sanitization for {self.Name}: {clean_err}")
             return True
         except Exception as e:
-            current_app.logger.error(f"Failed to process {self.Protocol}-quick save command:\n{str(e)}")
+            _logger.error(f"Failed to process {self.Protocol}-quick save command:\n{str(e)}")
             return False
+
+    def saveConfiguration(self) -> bool:
+        """
+        Public method to persist current runtime WireGuard state to configuration file.
+        Delegates to __wgSave().
+        """
+        return self.__wgSave()
 
     def refreshPeersRuntimeStats(self):
         try:
@@ -1376,7 +1433,7 @@ class WireguardConfiguration:
                         )
                         conn.execute(stmt, total_updates)
         except Exception as e:
-            current_app.logger.error(f"Error in refreshPeersRuntimeStats for {self.Name}: {e}")
+            _logger.error(f"Error in refreshPeersRuntimeStats for {self.Name}: {e}")
 
     def _force_refresh_stats(self):
         """Forces a synchronous refresh of peer stats from the kernel, bypassing the cache/debounce."""
@@ -1385,7 +1442,7 @@ class WireguardConfiguration:
             self._last_stats_refresh_time = 0
             self.refreshPeersRuntimeStats()
         except Exception as e:
-            current_app.logger.error(f"Error in _force_refresh_stats for {self.Name}: {e}")
+            _logger.error(f"Error in _force_refresh_stats for {self.Name}: {e}")
             self._last_stats_refresh_time = old_time
 
     def getPeersLatestHandshake(self):
@@ -1443,7 +1500,7 @@ class WireguardConfiguration:
                     return dict(existing)
         except Exception as e:
             try:
-                current_app.logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
+                _logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
             except Exception:
                 pass
         return None
@@ -1487,7 +1544,7 @@ class WireguardConfiguration:
                     )
                 )
         except Exception as e:
-            current_app.logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
+            _logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
             raise e
 
     def _compute_data_usage(self) -> dict:
@@ -1549,7 +1606,7 @@ class WireguardConfiguration:
                 return self._last_data_usage
             return res
         except Exception as e:
-            current_app.logger.error(f"{self.Name} _compute_data_usage() Error: {e}")
+            _logger.error(f"{self.Name} _compute_data_usage() Error: {e}")
             return getattr(self, '_last_data_usage', {"Total": 0.0, "Sent": 0.0, "Receive": 0.0})
 
     def toJson(self):
@@ -1655,7 +1712,7 @@ class WireguardConfiguration:
             self.__initPeersList()
             return True
         except Exception as e:
-            current_app.logger.error(f"Restoring backup failed: {e}")
+            _logger.error(f"Restoring backup failed: {e}")
             if original_content is not None:
                 with open(self.configPath, 'w', encoding='utf-8') as f:
                     f.write(original_content)
@@ -1677,7 +1734,7 @@ class WireguardConfiguration:
             if os.path.exists(sql_path):
                 os.remove(sql_path)
         except Exception as e:
-            current_app.logger.error(f"Deleting backup failed: {e}")
+            _logger.error(f"Deleting backup failed: {e}")
             return False
         return True
 
@@ -1791,7 +1848,7 @@ class WireguardConfiguration:
             )
             self.deleteConfiguration()
         except Exception as e:
-            current_app.logger.error(f"Failed to rename configuration.\nNew Configuration Name: {newConfigurationName}\nError: {str(e)}")
+            _logger.error(f"Failed to rename configuration.\nNew Configuration Name: {newConfigurationName}\nError: {str(e)}")
             return False, "Internal server error"
         return True, None
 
@@ -1812,7 +1869,7 @@ class WireguardConfiguration:
                         check = ipaddress.ip_network(ppip[0])
                         existedAddress.add(check)
                     except Exception as e:
-                        current_app.logger.error(f"{self.Name} peer {p.id} have invalid ip: {e}")
+                        _logger.error(f"{self.Name} peer {p.id} have invalid ip: {e}")
         configurationAddresses = self.Address.split(',')
         for ca in configurationAddresses:
             ca = ca.strip()
@@ -1826,7 +1883,7 @@ class WireguardConfiguration:
                         if p.version == network.version and p.subnet_of(network):
                             availableAddress[ca] -= 1
             except Exception as e:
-                current_app.logger.error(f"Error: Failed to parse IP address {ca} from {self.Name}: {e}")
+                _logger.error(f"Error: Failed to parse IP address {ca} from {self.Name}: {e}")
         return True, availableAddress
 
     def getAvailableIP(self, threshold = 255):
@@ -1846,7 +1903,7 @@ class WireguardConfiguration:
                         check = ipaddress.ip_network(ppip[0])
                         existedAddress.add(check.compressed)
                     except Exception as e:
-                        current_app.logger.error(f"{self.Name} peer {p.id} have invalid ip: {e}")
+                        _logger.error(f"{self.Name} peer {p.id} have invalid ip: {e}")
         configurationAddresses = self.Address.split(',')
         for ca in configurationAddresses:
             ca = ca.strip()
@@ -1862,7 +1919,7 @@ class WireguardConfiguration:
                         availableAddress[ca] = list(islice(filter(lambda ip : ip not in existedAddress,
                                                                   map(lambda iph : ipaddress.ip_network(iph).compressed, network.hosts())), threshold))
             except Exception as e:
-                current_app.logger.error(f"Failed to parse IP address {ca} from {self.Name}: {e}")
+                _logger.error(f"Failed to parse IP address {ca} from {self.Name}: {e}")
         return True, availableAddress
 
     def getRealtimeTrafficUsage(self):

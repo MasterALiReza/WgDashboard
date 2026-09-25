@@ -11,35 +11,47 @@ import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 _jinja_env = SandboxedEnvironment()
 import sqlalchemy as db
+from .DatabaseConnection import ConnectionString
+import logging
 from .PeerJob import PeerJob
-from  flask import current_app
+from flask import current_app
 from .PeerShareLink import PeerShareLink
 from .Utilities import GenerateWireguardPublicKey, GenerateWireguardPrivateKey, CheckAddress, ValidateDNSAddress
+
+_fallback_logger = logging.getLogger("WGDashboard")
+
+def _get_logger():
+    try:
+        if current_app:
+            return current_app.logger
+    except Exception:
+        pass
+    return _fallback_logger
 
 
 class Peer:
     def __init__(self, tableData, configuration):
         self.configuration = configuration
-        self.id = tableData["id"]
-        self.private_key = tableData["private_key"]
-        self.DNS = tableData["DNS"]
-        self.endpoint_allowed_ip = tableData["endpoint_allowed_ip"]
-        self.name = tableData["name"]
+        self.id = tableData.get("id", "")
+        self.private_key = tableData.get("private_key", "")
+        self.DNS = tableData.get("DNS", "")
+        self.endpoint_allowed_ip = tableData.get("endpoint_allowed_ip", "")
+        self.name = tableData.get("name", "")
         self.total_receive = tableData.get("total_receive") or 0.0
         self.total_sent = tableData.get("total_sent") or 0.0
         self.total_data = tableData.get("total_data") or (self.total_receive + self.total_sent)
-        self.endpoint = tableData["endpoint"]
-        self.status = tableData["status"]
-        self.latest_handshake = tableData["latest_handshake"]
-        self.allowed_ip = tableData["allowed_ip"]
+        self.endpoint = tableData.get("endpoint", "N/A")
+        self.status = tableData.get("status", "stopped")
+        self.latest_handshake = tableData.get("latest_handshake", "N/A")
+        self.allowed_ip = tableData.get("allowed_ip", "")
         self.cumu_receive = tableData.get("cumu_receive") or 0.0
         self.cumu_sent = tableData.get("cumu_sent") or 0.0
         self.cumu_data = tableData.get("cumu_data") or (self.cumu_receive + self.cumu_sent)
-        self.mtu = tableData["mtu"]
-        self.keepalive = tableData["keepalive"]
+        self.mtu = tableData.get("mtu")
+        self.keepalive = tableData.get("keepalive")
         self.notes = tableData.get("notes", "")
-        self.remote_endpoint = tableData["remote_endpoint"]
-        self.preshared_key = tableData["preshared_key"]
+        self.remote_endpoint = tableData.get("remote_endpoint", "")
+        self.preshared_key = tableData.get("preshared_key", "")
         self.restricted_reason = tableData.get("restricted_reason", "")
         self.jobs: list[PeerJob] = []
         self.ShareLink: list[PeerShareLink] = []
@@ -196,6 +208,11 @@ class Peer:
                 return False
 
             old_id = self.id
+            psk = (self.preshared_key or "").strip()
+            if psk in ("None", "null", "(none)", "N/A"):
+                psk = ""
+            psk_exist = bool(psk and len(psk) > 0)
+
             # If interface is active, update wireguard kernel
             if self.configuration.getStatus():
                 cmd_remove = [self.configuration.Protocol, "set", self.configuration.Name, "peer", old_id, "remove"]
@@ -203,11 +220,10 @@ class Peer:
 
                 rand = random.Random()
                 uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
-                psk_exist = bool(self.preshared_key and len(str(self.preshared_key).strip()) > 0)
                 try:
                     if psk_exist:
                         with open(uid, "w") as f:
-                            f.write(str(self.preshared_key).strip())
+                            f.write(psk)
                     clean_allowed_ips = (self.allowed_ip or "").replace(" ", "")
                     cmd_add = [
                         self.configuration.Protocol, "set", self.configuration.Name,
@@ -229,9 +245,22 @@ class Peer:
                 try:
                     self.configuration.saveConfiguration()
                 except Exception as save_err:
-                    current_app.logger.warning(f"Failed to save configuration during autoHealKeys: {save_err}")
+                    _get_logger().warning(f"Failed to save configuration during autoHealKeys: {save_err}")
+            else:
+                # Interface stopped: directly update peer PublicKey in .conf file on disk
+                try:
+                    conf_path = getattr(self.configuration, 'configPath', None)
+                    if conf_path and os.path.exists(conf_path):
+                        with open(conf_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        if old_id in content:
+                            new_content = content.replace(f"PublicKey = {old_id}", f"PublicKey = {new_pub}")
+                            with open(conf_path, 'w', encoding='utf-8') as f:
+                                f.write(new_content)
+                except Exception as file_err:
+                    _get_logger().warning(f"Failed to update config file for stopped interface during autoHealKeys: {file_err}")
 
-            # Update database
+            # Update database across interface tables
             with self.configuration.engine.begin() as conn:
                 conn.execute(
                     self.configuration.peersTable.update().values({
@@ -250,16 +279,53 @@ class Peer:
                         )
                     )
 
+            # Update cross-referenced tables: DashboardClientsPeerAssignment and PeerJobs
+            try:
+                main_engine = db.create_engine(ConnectionString("wgdashboard"))
+                with main_engine.begin() as m_conn:
+                    m_conn.execute(
+                        db.text("UPDATE DashboardClientsPeerAssignment SET PeerID = :new_id WHERE PeerID = :old_id"),
+                        {"new_id": new_pub, "old_id": old_id}
+                    )
+            except Exception:
+                pass
+
+            try:
+                job_engine = db.create_engine(ConnectionString("wgdashboard_job"))
+                with job_engine.begin() as j_conn:
+                    j_conn.execute(
+                        db.text("UPDATE PeerJobs SET Peer = :new_id WHERE Peer = :old_id"),
+                        {"new_id": new_pub, "old_id": old_id}
+                    )
+            except Exception:
+                pass
+
             self.id = new_pub
             self.private_key = new_priv
             if hasattr(self.configuration, '_peers_dict') and self.configuration._peers_dict is not None:
                 self.configuration._peers_dict.pop(old_id, None)
                 self.configuration._peers_dict[new_pub] = self
 
-            current_app.logger.info(f"Successfully auto-healed keys for peer {old_id} -> {new_pub}")
+            try:
+                if hasattr(self.configuration, 'AllPeerJobs') and self.configuration.AllPeerJobs:
+                    for j in getattr(self.configuration.AllPeerJobs, 'Jobs', []):
+                        if getattr(j, 'Peer', None) == old_id:
+                            j.Peer = new_pub
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self.configuration, 'AllPeerShareLinks') and self.configuration.AllPeerShareLinks:
+                    for l in getattr(self.configuration.AllPeerShareLinks, 'ShareLinks', []):
+                        if getattr(l, 'Peer', None) == old_id:
+                            l.Peer = new_pub
+            except Exception:
+                pass
+
+            _get_logger().info(f"Successfully auto-healed keys for peer {old_id} -> {new_pub}")
             return True
         except Exception as err:
-            current_app.logger.error(f"Error in autoHealKeys for peer {self.id}: {err}", exc_info=True)
+            _get_logger().error(f"Error in autoHealKeys for peer {self.id}: {err}", exc_info=True)
             return False
 
     def downloadPeer(self) -> dict[str, str]:
@@ -294,22 +360,45 @@ class Peer:
             if re.match("^[a-zA-Z0-9_=+.-]$", i):
                 final["fileName"] += i
 
+        # MTU sanitization
+        raw_mtu = (
+            self.configuration.configurationInfo.OverridePeerSettings.MTU
+            if self.configuration.configurationInfo.OverridePeerSettings.MTU else self.mtu
+        )
+        mtu_val = None
+        if raw_mtu is not None:
+            try:
+                m_int = int(raw_mtu)
+                if m_int > 0:
+                    mtu_val = m_int
+            except (ValueError, TypeError):
+                pass
+
+        # DNS sanitization
+        dns_val = (
+            self.configuration.configurationInfo.OverridePeerSettings.DNS 
+            if self.configuration.configurationInfo.OverridePeerSettings.DNS else self.DNS
+        )
+        if dns_val in ("None", "null", "(none)", "N/A", ""):
+            dns_val = None
+
+        # Address sanitization
+        addr_val = self.allowed_ip
+
+        # PrivateKey validation
+        priv_val = self.private_key if self.private_key and len(str(self.private_key).strip()) > 0 else None
+
         interfaceSection = {
-            "PrivateKey": self.private_key if self.private_key and len(str(self.private_key).strip()) > 0 else None,
-            "Address": self.allowed_ip,
-            "MTU": (
-                self.configuration.configurationInfo.OverridePeerSettings.MTU
-                    if self.configuration.configurationInfo.OverridePeerSettings.MTU else self.mtu
-            ),
-            "DNS": (
-                self.configuration.configurationInfo.OverridePeerSettings.DNS 
-                    if self.configuration.configurationInfo.OverridePeerSettings.DNS else self.DNS
-            )
+            "PrivateKey": priv_val,
+            "Address": addr_val,
+            "MTU": mtu_val,
+            "DNS": dns_val
         }
 
-        if not self.private_key or len(str(self.private_key).strip()) == 0:
+        if not priv_val:
             interfaceSection["# PrivateKey"] = "<INSERT_CLIENT_PRIVATE_KEY_HERE> (Required by WireGuard)"
             final["warning"] = "PrivateKey was not stored on the server (client-side keypair)."
+            final["error"] = "PrivateKey is missing for this peer. A valid WireGuard client configuration cannot be generated without a private key."
 
         if self.configuration.Protocol == "awg":
             interfaceSection.update({
@@ -331,20 +420,56 @@ class Peer:
                 "I5": self.configuration.I5
             })
 
+        # PersistentKeepalive sanitization
+        raw_keepalive = (
+            self.configuration.configurationInfo.OverridePeerSettings.PersistentKeepalive 
+            if self.configuration.configurationInfo.OverridePeerSettings.PersistentKeepalive
+            else self.keepalive
+        )
+        keepalive_val = None
+        if raw_keepalive is not None:
+            try:
+                k_int = int(raw_keepalive)
+                if k_int > 0:
+                    keepalive_val = k_int
+            except (ValueError, TypeError):
+                pass
+
+        # PresharedKey sanitization
+        psk_val = self.preshared_key
+        if psk_val in ("None", "null", "(none)", "N/A", "") or not psk_val:
+            psk_val = None
+
+        # Endpoint sanitization
+        remote_ep = (
+            self.configuration.configurationInfo.OverridePeerSettings.PeerRemoteEndpoint 
+            if self.configuration.configurationInfo.OverridePeerSettings.PeerRemoteEndpoint 
+            else self.configuration.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1]
+        )
+        listen_port = (
+            self.configuration.configurationInfo.OverridePeerSettings.ListenPort 
+            if self.configuration.configurationInfo.OverridePeerSettings.ListenPort 
+            else self.configuration.ListenPort
+        )
+        endpoint_val = f"{remote_ep}:{listen_port}" if (remote_ep and listen_port) else None
+
+        # EndpointAllowedIPs sanitization
+        ep_allowed_ips = (
+            self.configuration.configurationInfo.OverridePeerSettings.EndpointAllowedIPs
+            if self.configuration.configurationInfo.OverridePeerSettings.EndpointAllowedIPs 
+            else self.endpoint_allowed_ip
+        )
+        if not ep_allowed_ips or ep_allowed_ips in ("None", "null", "(none)", "N/A"):
+            ep_allowed_ips = "0.0.0.0/0, ::/0"
+
         peerSection = {
             "PublicKey": self.configuration.PublicKey,
-            "AllowedIPs": (
-                self.configuration.configurationInfo.OverridePeerSettings.EndpointAllowedIPs
-                    if self.configuration.configurationInfo.OverridePeerSettings.EndpointAllowedIPs else self.endpoint_allowed_ip
-            ),
-            "Endpoint": f'{(self.configuration.configurationInfo.OverridePeerSettings.PeerRemoteEndpoint if self.configuration.configurationInfo.OverridePeerSettings.PeerRemoteEndpoint else self.configuration.DashboardConfig.GetConfig("Peers", "remote_endpoint")[1])}:{(self.configuration.configurationInfo.OverridePeerSettings.ListenPort if self.configuration.configurationInfo.OverridePeerSettings.ListenPort else self.configuration.ListenPort)}',
-            "PersistentKeepalive": (
-                self.configuration.configurationInfo.OverridePeerSettings.PersistentKeepalive 
-                if self.configuration.configurationInfo.OverridePeerSettings.PersistentKeepalive
-                else self.keepalive
-            ),
-            "PresharedKey": self.preshared_key
+            "AllowedIPs": ep_allowed_ips,
+            "Endpoint": endpoint_val,
+            "PersistentKeepalive": keepalive_val,
+            "PresharedKey": psk_val
         }
+
         combine = [interfaceSection.items(), peerSection.items()]
         for s in range(len(combine)):
             if s == 0:
@@ -360,7 +485,6 @@ class Peer:
         except Exception:
             # Fallback to the raw string if Jinja rendering fails due to user input containing invalid template syntax
             pass
-
 
         if self.configuration.Protocol == "awg":
             final["amneziaVPN"] = json.dumps({

@@ -458,6 +458,8 @@ def auth_req():
                 f'{appPrefix}/api/sharePeer/get', 
                 f'{appPrefix}/api/isTotpEnabled', 
                 f'{appPrefix}/api/locale',
+                f'{appPrefix}/api/requireAuthentication',
+                f'{appPrefix}/api/handshake',
             ]
         
 

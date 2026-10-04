@@ -93,8 +93,9 @@ class AmneziaPeer(Peer):
                     except Exception:
                         pass
 
-            if len(updateAllowedIp.decode().strip("\n")) != 0:
-                current_app.logger.error(f"Update peer failed when updating Allowed IPs.\nInput: {newAllowedIPs}\nOutput: {updateAllowedIp.decode().strip('\n')}")
+            clean_output = updateAllowedIp.decode().strip()
+            if len(clean_output) != 0:
+                current_app.logger.error(f"Update peer failed when updating Allowed IPs.\nInput: {newAllowedIPs}\nOutput: {clean_output}")
                 return False, "Internal server error"
 
             command = [f"{self.configuration.Protocol}-quick", "save", self.configuration.Name]

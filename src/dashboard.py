@@ -55,7 +55,7 @@ class CustomJsonEncoder(DefaultJSONProvider):
             return dict(o)
         if type(o) is datetime:
             return o.strftime("%Y-%m-%d %H:%M:%S")
-        return super().default(self)
+        return super().default(o)
 
 
 

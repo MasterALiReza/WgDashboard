@@ -148,16 +148,17 @@ class TestPeerAutoHeal:
             assert rows[0]["id"] == peer.id
             assert rows[0]["private_key"] == peer.private_key
 
-    def test_download_peer_triggers_auto_heal_when_missing_key(self, mock_peer_env):
+    def test_download_peer_returns_error_when_missing_key(self, mock_peer_env):
         config, peer = mock_peer_env
         assert peer.private_key == ""
+        old_id = peer.id
 
         dl = peer.downloadPeer()
-        assert "file" in dl
-        assert "error" not in dl or dl.get("error") is None
-        assert f"PrivateKey = {peer.private_key}" in dl["file"]
-        assert f"Address = {peer.allowed_ip}" in dl["file"]
-        assert f"PublicKey = {config.PublicKey}" in dl["file"]
+        assert "error" in dl
+        assert "PrivateKey is missing" in dl["error"]
+        # Ensure peer ID was NOT silently regenerated
+        assert peer.id == old_id
+        assert peer.private_key == ""
 
     def test_download_peer_sanitizes_preshared_key(self, mock_peer_env):
         config, peer = mock_peer_env

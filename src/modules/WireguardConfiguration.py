@@ -25,6 +25,25 @@ class _ContextSafeLoggerProxy:
 
 _logger = _ContextSafeLoggerProxy()
 
+class _PeerFallback:
+    def __init__(self, data=None):
+        self.jobs = []
+        self.ShareLink = []
+        self.id = ""
+        self.total_receive = 0.0
+        self.total_sent = 0.0
+        self.total_data = 0.0
+        self.cumu_receive = 0.0
+        self.cumu_sent = 0.0
+        self.cumu_data = 0.0
+        if data:
+            if hasattr(data, "items"):
+                for k, v in data.items():
+                    setattr(self, str(k), v)
+            elif isinstance(data, dict):
+                for k, v in data.items():
+                    setattr(self, str(k), v)
+
 from .DatabaseConnection import ConnectionString
 from .DashboardConfig import DashboardConfig
 from .Peer import Peer
@@ -161,7 +180,6 @@ class WireguardConfiguration:
             os.mkdir(os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup'))
 
         _logger.info(f"Initialized Configuration: {name}")
-        self.__dumpDatabase()
         if self.getAutostartStatus() and not self.getStatus() and startup:
             status, ext = self.toggleConfiguration()
             if not status:
@@ -189,7 +207,6 @@ class WireguardConfiguration:
         self.Peers: list[Peer] = []
         self.getPeers()
         self.getRestrictedPeersList()
-        self.healPeersWithMissingPrivateKeys()
 
     def getRawConfigurationFile(self):
         return open(self.configPath, 'r').read()
@@ -429,7 +446,9 @@ class WireguardConfiguration:
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
             for i in restricted:
-                new_restricted.append(cls(i, self))
+                p = cls(i, self)
+                p.restricted = True
+                new_restricted.append(p)
         self.RestrictedPeers = new_restricted
         self._last_restricted_peers_time = current_time
 
@@ -627,9 +646,6 @@ class WireguardConfiguration:
                 "peers": []
             }
             try:
-                if not self.getStatus():
-                    self.toggleConfiguration()
-
                 cleanedAllowedIPs = {}
                 for p in peers:
                     # Sanitize preshared_key
@@ -693,39 +709,55 @@ class WireguardConfiguration:
                             if ip_clean and ip_clean != "N/A":
                                 used_allowed_ips.add(ip_clean)
 
+                used_networks = []
+                for ip_str in used_allowed_ips:
+                    try:
+                        used_networks.append(ipaddress.ip_network(ip_str, strict=False))
+                    except Exception:
+                        pass
+
                 for p in peers:
                     for ip in cleanedAllowedIPs[p['id']].split(','):
                         ip_clean = ip.strip()
-                        if ip_clean in used_allowed_ips:
-                            return False, [], f"Allowed IP already taken by another peer: {ip_clean}"
-
-                # Phase 1: Configure WireGuard kernel runtime first with rollback tracking
-                applied_keys_to_kernel = []
-                try:
-                    for p in peers:
-                        presharedKeyExist = bool(p.get('preshared_key'))
-                        uid = None
+                        if not ip_clean:
+                            continue
                         try:
-                            if presharedKeyExist:
-                                uid = write_psk_tmp(p['preshared_key'])
-
-                            command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                            subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
-                            applied_keys_to_kernel.append(p['id'])
-                        finally:
-                            if uid and os.path.exists(uid):
-                                try:
-                                    os.remove(uid)
-                                except Exception:
-                                    pass
-                except Exception as kernel_err:
-                    _logger.error(f"Kernel apply error during addPeers: {kernel_err}")
-                    for applied_id in applied_keys_to_kernel:
-                        try:
-                            subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
+                            new_net = ipaddress.ip_network(ip_clean, strict=False)
                         except Exception:
-                            pass
-                    return False, [], f"WireGuard kernel configuration failed: {kernel_err}"
+                            continue
+                        for existing_net in used_networks:
+                            if new_net.version == existing_net.version and new_net.overlaps(existing_net):
+                                return False, [], f"Allowed IP already taken by another peer: {ip_clean}"
+                        used_networks.append(new_net)
+
+                # Phase 1: Configure WireGuard kernel runtime if interface is active
+                applied_keys_to_kernel = []
+                if self.getStatus():
+                    try:
+                        for p in peers:
+                            presharedKeyExist = bool(p.get('preshared_key'))
+                            uid = None
+                            try:
+                                if presharedKeyExist:
+                                    uid = write_psk_tmp(p['preshared_key'])
+
+                                command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                                subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                                applied_keys_to_kernel.append(p['id'])
+                            finally:
+                                if uid and os.path.exists(uid):
+                                    try:
+                                        os.remove(uid)
+                                    except Exception:
+                                        pass
+                    except Exception as kernel_err:
+                        _logger.error(f"Kernel apply error during addPeers: {kernel_err}")
+                        for applied_id in applied_keys_to_kernel:
+                            try:
+                                subprocess.check_output([self.Protocol, "set", self.Name, "peer", applied_id, "remove"], stderr=subprocess.STDOUT, timeout=10)
+                            except Exception:
+                                pass
+                        return False, [], f"WireGuard kernel configuration failed: {kernel_err}"
 
                 # Phase 2: Insert into SQLite database in a single transaction
                 try:
@@ -810,9 +842,6 @@ class WireguardConfiguration:
 
     def allowAccessPeers(self, listOfPublicKeys) -> tuple[bool, str]:
         with self.lock:
-            if not self.getStatus():
-                self.toggleConfiguration()
-
             # Step 1: Read restricted peer definitions outside transaction
             peers_to_allow = []
             with self.engine.connect() as conn:
@@ -827,7 +856,7 @@ class WireguardConfiguration:
             if not peers_to_allow:
                 return False, "Failed to allow access of specified peer(s)"
 
-            # Step 2: Configure WireGuard interface outside DB transaction
+            # Step 2: Configure WireGuard interface outside DB transaction if active
             successfully_applied_keys = []
             failed_count = 0
             for restrictedPeer in peers_to_allow:
@@ -838,22 +867,25 @@ class WireguardConfiguration:
                     failed_count += 1
                     continue
 
-                try:
-                    if presharedKeyExist:
-                        uid = write_psk_tmp(restrictedPeer['preshared_key'])
+                if self.getStatus():
+                    try:
+                        if presharedKeyExist:
+                            uid = write_psk_tmp(restrictedPeer['preshared_key'])
 
-                    command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
-                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                        command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
+                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                        successfully_applied_keys.append(restrictedPeer["id"])
+                    except Exception as e:
+                        _logger.error(f"Error applying WireGuard config for peer {restrictedPeer.get('id')}: {e}")
+                        failed_count += 1
+                    finally:
+                        if uid and os.path.exists(uid):
+                            try:
+                                os.remove(uid)
+                            except Exception:
+                                pass
+                else:
                     successfully_applied_keys.append(restrictedPeer["id"])
-                except Exception as e:
-                    _logger.error(f"Error applying WireGuard config for peer {restrictedPeer.get('id')}: {e}")
-                    failed_count += 1
-                finally:
-                    if uid and os.path.exists(uid):
-                        try:
-                            os.remove(uid)
-                        except Exception:
-                            pass
 
             # Step 3: Atomic, ultra-fast DB update
             with self.engine.begin() as conn:
@@ -887,9 +919,7 @@ class WireguardConfiguration:
             self._force_refresh_stats()
             numOfRestrictedPeers = 0
             numOfFailedToRestrictPeers = 0
-            if not self.getStatus():
-                self.toggleConfiguration()
-
+            listOfPublicKeys = list(dict.fromkeys(listOfPublicKeys))
             # Step 1: Find valid peers to restrict
             peers_to_restrict = []
             for p in listOfPublicKeys:
@@ -902,16 +932,19 @@ class WireguardConfiguration:
             if not peers_to_restrict:
                 return False, f"No active peer(s) found to restrict"
 
-            # Step 2: Remove peers from WireGuard kernel runtime outside DB transaction
+            # Step 2: Remove peers from WireGuard kernel runtime outside DB transaction if running
             removed_peer_ids = []
             for pf in peers_to_restrict:
-                try:
-                    command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
-                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                if self.getStatus():
+                    try:
+                        command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
+                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                        removed_peer_ids.append(pf.id)
+                    except Exception as e:
+                        _logger.error(f"Error removing peer {pf.id} from WireGuard runtime: {e}")
+                        numOfFailedToRestrictPeers += 1
+                else:
                     removed_peer_ids.append(pf.id)
-                except Exception as e:
-                    _logger.error(f"Error removing peer {pf.id} from WireGuard runtime: {e}")
-                    numOfFailedToRestrictPeers += 1
 
             # Step 3: Atomic, ultra-fast DB update
             with self.engine.begin() as conn:
@@ -956,11 +989,6 @@ class WireguardConfiguration:
     def deletePeers(self, listOfPublicKeys, AllPeerJobs: PeerJobs, AllPeerShareLinks: PeerShareLinks) -> tuple[bool, str]:
         with self.lock:
             self._force_refresh_stats()
-            if not self.getStatus():
-                try:
-                    self.toggleConfiguration()
-                except Exception:
-                    pass
 
             # Gather peers to delete first with direct DB fallback
             peers_to_delete = []
@@ -983,19 +1011,19 @@ class WireguardConfiguration:
                             if row_p:
                                 found = True
                                 is_restricted = False
-                                pf = type('PeerFallback', (), dict(row_p, jobs=[], ShareLink=[]))()
+                                pf = _PeerFallback(row_p)
                             else:
                                 row_r = conn.execute(self.peersRestrictedTable.select().where(self.peersRestrictedTable.c.id.in_([p, p_clean]))).mappings().fetchone()
                                 if row_r:
                                     found = True
                                     is_restricted = True
-                                    pf = type('PeerFallback', (), dict(row_r, jobs=[], ShareLink=[]))()
+                                    pf = _PeerFallback(row_r)
                     except Exception as e:
                         _logger.warning(f"Error checking DB for peer {p} during delete: {e}")
 
                 if not found:
                     # Fallback for ghost/orphan keys: allow cleaning from kernel runtime and DB tables
-                    pf = type('PeerFallback', (), {'id': p_clean or p, 'jobs': [], 'ShareLink': []})()
+                    pf = _PeerFallback({'id': p_clean or p})
                     peers_to_delete.append((pf, False))
                 else:
                     peers_to_delete.append((pf, is_restricted))
@@ -1016,11 +1044,12 @@ class WireguardConfiguration:
                     except Exception:
                         pass
 
-                try:
-                    command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
-                    subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
-                except Exception:
-                    pass
+                if self.getStatus():
+                    try:
+                        command = [self.Protocol, "set", self.Name, "peer", pf.id, "remove"]
+                        subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
+                    except Exception:
+                        pass
 
             # Step 2: Calculate total traffic of all peers to be deleted and execute SQLite deletions cleanly inside a single transaction
             numOfDeletedPeers = 0
@@ -1066,18 +1095,23 @@ class WireguardConfiguration:
                 for peer_id in valid_delete_ids:
                     try:
                         delete_ids = list({peer_id, peer_id.replace('+', ' '), peer_id.replace(' ', '+')})
-                        conn.execute(
+                        res1 = conn.execute(
                             self.peersTable.delete().where(
                                 self.peersTable.columns.id.in_(delete_ids)
                             )
                         )
-                        conn.execute(
+                        res2 = conn.execute(
                             self.peersRestrictedTable.delete().where(
                                 self.peersRestrictedTable.columns.id.in_(delete_ids)
                             )
                         )
-                        deleted.append(peer_id)
-                        numOfDeletedPeers += 1
+                        deleted_count = (res1.rowcount if res1.rowcount and res1.rowcount > 0 else 0) + \
+                                        (res2.rowcount if res2.rowcount and res2.rowcount > 0 else 0)
+                        if deleted_count > 0:
+                            deleted.append(peer_id)
+                            numOfDeletedPeers += 1
+                        else:
+                            numOfFailedToDeletePeers += 1
                     except Exception as e:
                         _logger.error(f"Error executing DB deletion for peer {peer_id}: {e}")
                         numOfFailedToDeletePeers += 1
@@ -1089,7 +1123,7 @@ class WireguardConfiguration:
             self.getPeers()
             self.getRestrictedPeers(force=True)
             
-            if numOfDeletedPeers == 0 and numOfFailedToDeletePeers == 0:
+            if numOfDeletedPeers == 0:
                 return False, "No peer(s) to delete found"
             
             if numOfDeletedPeers == len(listOfPublicKeys):
@@ -1192,10 +1226,6 @@ class WireguardConfiguration:
                         if keepalive and str(keepalive).isdigit() and int(keepalive) > 0:
                             cmd.extend(["persistent-keepalive", str(keepalive)])
 
-                        remote_ep = peer_data.get('remote_endpoint')
-                        if remote_ep and remote_ep != 'N/A' and ':' in remote_ep:
-                            cmd.extend(["endpoint", remote_ep])
-
                         subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15)
                         results["repaired_peers"].append(pid_clean)
                         needs_save = True
@@ -1239,7 +1269,55 @@ class WireguardConfiguration:
 
     def __wgSave(self) -> bool:
         if not self.getStatus():
-            return True
+            # BUG-12: When interface is stopped, directly update .conf file from DB
+            if not os.path.exists(self.configPath):
+                return True
+            try:
+                # Read [Interface] section up to the first [Peer]
+                interface_lines = []
+                with open(self.configPath, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        if line.strip().lower() == "[peer]":
+                            break
+                        if re.match(r'^\s*SaveConfig\s*=', line, re.IGNORECASE):
+                            interface_lines.append("SaveConfig = false\n")
+                        else:
+                            interface_lines.append(line)
+
+                # Fetch active peers from DB (excluding restricted)
+                peer_blocks = []
+                with self.engine.connect() as conn:
+                    active_rows = conn.execute(self.peersTable.select()).mappings().fetchall()
+                    for p in active_rows:
+                        pub_id = p.get('id')
+                        allowed_ips = (p.get('allowed_ip') or '').strip()
+                        psk = (p.get('preshared_key') or '').strip()
+                        keepalive = p.get('keepalive')
+
+                        if not pub_id or not allowed_ips:
+                            continue
+                        block = ["\n[Peer]\n", f"PublicKey = {pub_id}\n", f"AllowedIPs = {allowed_ips}\n"]
+                        if psk and psk not in ("None", "null", "(none)", "N/A"):
+                            block.append(f"PresharedKey = {psk}\n")
+                        if keepalive and str(keepalive).isdigit() and int(keepalive) > 0:
+                            block.append(f"PersistentKeepalive = {keepalive}\n")
+                        peer_blocks.extend(block)
+
+                tmp_conf = self.configPath + ".tmp"
+                with open(tmp_conf, 'w', encoding='utf-8') as f:
+                    f.writelines(interface_lines)
+                    f.writelines(peer_blocks)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(tmp_conf, 0o600)
+                except Exception:
+                    pass
+                os.replace(tmp_conf, self.configPath)
+                return True
+            except Exception as e:
+                _logger.error(f"Failed to save stopped configuration to disk for {self.Name}: {e}")
+                return False
         try:
             command = [f"{self.Protocol}-quick", "save", self.Name]
             subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
@@ -1691,6 +1769,7 @@ class WireguardConfiguration:
         backups = list(map(lambda x : x['filename'], self.getBackups()))
         if backupFileName not in backups:
             return False
+        was_running = bool(self.Status)
         if self.Status:
             self.toggleConfiguration()
         target = os.path.join(self.__getProtocolPath(), 'WGDashboard_Backup', backupFileName)
@@ -1708,10 +1787,11 @@ class WireguardConfiguration:
             targetContent = f.read()
 
         try:
+            self.backupConfigurationFile()
             with open(self.configPath, 'w', encoding='utf-8') as f:
                 f.write(targetContent)
             self.__parseConfigurationFile()
-            self.__importDatabase(targetSQL, restore=True)
+            self.__importDatabase(targetSQL, restore=False)
             self.__initPeersList()
             return True
         except Exception as e:
@@ -1724,6 +1804,9 @@ class WireguardConfiguration:
                 except Exception:
                     pass
             return False
+        finally:
+            if was_running and not self.getStatus():
+                self.toggleConfiguration()
 
     def deleteBackup(self, backupFileName: str) -> bool:
         backups = list(map(lambda x : x['filename'], self.getBackups()))
@@ -1763,52 +1846,118 @@ class WireguardConfiguration:
         return True, zip_name
 
     def updateConfigurationSettings(self, newData: dict) -> tuple[bool, str]:
-        if self.Status:
-            self.toggleConfiguration()
-        original = []
-        dataChanged = False
-        with open(self.configPath, 'r') as f:
-            original = [l.rstrip("\n") for l in f.readlines()]
-            allowEdit = ["Address", "PreUp", "PostUp", "PreDown", "PostDown", "ListenPort", "Table"]
-            if self.Protocol == 'awg':
-                allowEdit += ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5"]
+        was_running = self.getStatus()
+        allowEdit = ["Address", "PreUp", "PostUp", "PreDown", "PostDown", "ListenPort", "Table"]
+        if self.Protocol == 'awg':
+            allowEdit += ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5"]
+
+        sanitized_data = {}
+        for key in allowEdit:
+            if key in newData and newData[key] is not None:
+                sanitized_data[key] = str(newData[key]).strip()
+            elif hasattr(self, key) and getattr(self, key) is not None:
+                sanitized_data[key] = str(getattr(self, key)).strip()
+            else:
+                sanitized_data[key] = ""
+
+        try:
+            if was_running:
+                self.toggleConfiguration()
+
+            with open(self.configPath, 'r', encoding='utf-8', errors='ignore') as f:
+                original = [l.rstrip("\n") for l in f.readlines()]
             start = original.index("[Interface]")
             try:
                 end = original.index("[Peer]")
-            except ValueError as e:
+            except ValueError:
                 end = len(original)
             new = ["[Interface]"]
-            peerFound = False
             for line in range(start, end):
                 split = re.split(r'\s*=\s*', original[line], 1)
                 if len(split) == 2:
                     if split[0] not in allowEdit:
                         new.append(original[line])
             for key in allowEdit:
-                new.insert(1, f"{key} = {str(newData[key]).strip()}")
+                if sanitized_data[key]:
+                    new.insert(1, f"{key} = {sanitized_data[key]}")
             new.append("")
             for line in range(end, len(original)):
                 new.append(original[line])
+
             self.backupConfigurationFile()
-            with open(self.configPath, 'w') as f:
+            with open(self.configPath, 'w', encoding='utf-8') as f:
                 f.write("\n".join(new))
 
-        status, msg = self.toggleConfiguration()
-        if not status:
-            return False, msg
-        for i in allowEdit:
-            setattr(self, i, str(newData[i]))
-                
-        return True, ""
+            for i in allowEdit:
+                setattr(self, i, sanitized_data[i])
 
-    def deleteConfiguration(self):
+            if was_running:
+                status, msg = self.toggleConfiguration()
+                if not status:
+                    return False, msg
+
+            return True, ""
+        except Exception as e:
+            _logger.error(f"Error updating configuration settings for {self.Name}: {e}")
+            if was_running and not self.getStatus():
+                self.toggleConfiguration()
+            return False, str(e)
+
+    def deleteConfiguration(self, is_rename=False):
         if self.getStatus():
             self.toggleConfiguration()
-        os.remove(self.configPath)
+        if not is_rename:
+            # Take a safety backup before deleting
+            try:
+                self.backupConfigurationFile()
+            except Exception as e:
+                _logger.warning(f"Failed to backup before deletion for {self.Name}: {e}")
+
+            # Clean up orphan data across shared tables
+            try:
+                # Clean up PeerJobs
+                if hasattr(self, 'AllPeerJobs') and self.AllPeerJobs:
+                    for job in list(getattr(self.AllPeerJobs, 'Jobs', [])):
+                        if getattr(job, 'Configuration', None) == self.Name:
+                            try:
+                                self.AllPeerJobs.deleteJob(job)
+                            except Exception:
+                                pass
+
+                # Clean up PeerShareLinks, ConfigurationsInfo, DashboardClientsPeerAssignment in DB
+                with self.engine.begin() as conn:
+                    # ConfigurationsInfo
+                    conn.execute(
+                        sqlalchemy.text('DELETE FROM "ConfigurationsInfo" WHERE "ID" = :name'),
+                        {"name": self.Name}
+                    )
+                    # PeerShareLinks
+                    conn.execute(
+                        sqlalchemy.text('DELETE FROM "PeerShareLinks" WHERE "Configuration" = :name'),
+                        {"name": self.Name}
+                    )
+                    # DashboardClientsPeerAssignment
+                    conn.execute(
+                        sqlalchemy.text('DELETE FROM "DashboardClientsPeerAssignment" WHERE "ConfigurationName" = :name'),
+                        {"name": self.Name}
+                    )
+                # Refresh share links
+                if hasattr(self, 'AllPeerShareLinks') and self.AllPeerShareLinks:
+                    try:
+                        self.AllPeerShareLinks._PeerShareLinks__getSharedLinks()
+                    except Exception:
+                        pass
+            except Exception as orphan_err:
+                _logger.error(f"Error cleaning orphan records for {self.Name}: {orphan_err}")
+
+        if os.path.exists(self.configPath):
+            os.remove(self.configPath)
         self.__dropDatabase()
         return True
 
     def renameConfiguration(self, newConfigurationName) -> tuple[bool, str]:
+        if not newConfigurationName or not isinstance(newConfigurationName, str):
+            return False, "Invalid configuration name"
         newConfigurationName = os.path.basename(newConfigurationName)
 
         if len(newConfigurationName) > 15 or not re.match(r'^[a-zA-Z0-9_=\+\.\-]{1,15}$', newConfigurationName):
@@ -1827,7 +1976,7 @@ class WireguardConfiguration:
 
                     conn.execute(
                         sqlalchemy.text(
-                            f'INSERT INTO `{newConfig}` SELECT * FROM `{oldConfig}`'
+                            f'INSERT INTO "{newConfig}" SELECT * FROM "{oldConfig}"'
                         )
                     )
 
@@ -1839,17 +1988,47 @@ class WireguardConfiguration:
                 doRenameStatement("_traffic_snapshot")
                 conn.execute(
                     sqlalchemy.text(
-                        f'UPDATE `{newConfigurationName}_traffic_snapshot` SET configuration_name = :new_name WHERE configuration_name = :old_name'
+                        f'UPDATE "{newConfigurationName}_traffic_snapshot" SET configuration_name = :new_name WHERE configuration_name = :old_name'
+                    ),
+                    {"new_name": newConfigurationName, "old_name": self.Name}
+                )
+
+                # Migrate ConfigurationsInfo
+                conn.execute(
+                    sqlalchemy.text(
+                        'UPDATE "ConfigurationsInfo" SET "ID" = :new_name WHERE "ID" = :old_name'
+                    ),
+                    {"new_name": newConfigurationName, "old_name": self.Name}
+                )
+
+                # Migrate PeerShareLinks
+                conn.execute(
+                    sqlalchemy.text(
+                        'UPDATE "PeerShareLinks" SET "Configuration" = :new_name WHERE "Configuration" = :old_name'
+                    ),
+                    {"new_name": newConfigurationName, "old_name": self.Name}
+                )
+
+                # Migrate DashboardClientsPeerAssignment
+                conn.execute(
+                    sqlalchemy.text(
+                        'UPDATE "DashboardClientsPeerAssignment" SET "ConfigurationName" = :new_name WHERE "ConfigurationName" = :old_name'
                     ),
                     {"new_name": newConfigurationName, "old_name": self.Name}
                 )
 
             self.AllPeerJobs.updateJobConfigurationName(self.Name, newConfigurationName)
+            if hasattr(self, 'AllPeerShareLinks') and self.AllPeerShareLinks:
+                try:
+                    self.AllPeerShareLinks._PeerShareLinks__getSharedLinks()
+                except Exception:
+                    pass
+
             shutil.copy(
                 self.configPath,
                 os.path.join(self.__getProtocolPath(), f'{newConfigurationName}.conf')
             )
-            self.deleteConfiguration()
+            self.deleteConfiguration(is_rename=True)
         except Exception as e:
             _logger.error(f"Failed to rename configuration.\nNew Configuration Name: {newConfigurationName}\nError: {str(e)}")
             return False, "Internal server error"
@@ -1880,11 +2059,18 @@ class WireguardConfiguration:
             try:
                 if len(caSplit) == 2:
                     network = ipaddress.ip_network(ca, False)
+                    # Exclude network and broadcast addresses to match hosts()
+                    if network.version == 4:
+                        usable_total = network.num_addresses - 2 if network.prefixlen < 31 else network.num_addresses
+                    else:
+                        usable_total = network.num_addresses - 1 if network.prefixlen < 127 else network.num_addresses
+
                     existedAddress.add(ipaddress.ip_network(caSplit[0]))
-                    availableAddress[ca] = network.num_addresses
+                    occupied = 0
                     for p in existedAddress:
                         if p.version == network.version and p.subnet_of(network):
-                            availableAddress[ca] -= 1
+                            occupied += 1
+                    availableAddress[ca] = max(0, usable_total - occupied)
             except Exception as e:
                 _logger.error(f"Error: Failed to parse IP address {ca} from {self.Name}: {e}")
         return True, availableAddress

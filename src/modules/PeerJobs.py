@@ -35,15 +35,17 @@ class PeerJobs:
         self.cleanJob(init=True)
 
     def __getJobs(self):
-        self.Jobs.clear()
-        with self.engine.connect() as conn:
-            jobs = conn.execute(self.peerJobTable.select().where(
-                self.peerJobTable.columns.ExpireDate.is_(None)
-            )).mappings().fetchall()
-            for job in jobs:
-                self.Jobs.append(PeerJob(
-                    job['JobID'], job['Configuration'], job['Peer'], job['Field'], job['Operator'], job['Value'],
-                    job['CreationDate'], job['ExpireDate'], job['Action']))
+        with self.lock:
+            with self.engine.connect() as conn:
+                jobs = conn.execute(self.peerJobTable.select().where(
+                    self.peerJobTable.columns.ExpireDate.is_(None)
+                )).mappings().fetchall()
+                new_jobs = []
+                for job in jobs:
+                    new_jobs.append(PeerJob(
+                        job['JobID'], job['Configuration'], job['Peer'], job['Field'], job['Operator'], job['Value'],
+                        job['CreationDate'], job['ExpireDate'], job['Action']))
+                self.Jobs = new_jobs
 
     def getAllJobs(self, configuration: str = None, active_only: bool = False):
         if configuration is not None:
@@ -63,94 +65,100 @@ class PeerJobs:
         return []
 
     def toJson(self):
-        return [x.toJson() for x in self.Jobs]
+        with self.lock:
+            return [x.toJson() for x in self.Jobs]
 
     def searchJob(self, Configuration: str, Peer: str):
-        return list(filter(lambda x: x.Configuration == Configuration and x.Peer == Peer, self.Jobs))
+        with self.lock:
+            return list(filter(lambda x: x.Configuration == Configuration and x.Peer == Peer, self.Jobs))
 
     def searchJobById(self, JobID):
-        return list(filter(lambda x: x.JobID == JobID, self.Jobs))
+        with self.lock:
+            return list(filter(lambda x: x.JobID == JobID, self.Jobs))
 
     def saveJob(self, Job: PeerJob) -> tuple[bool, list] | tuple[bool, str]:
         import traceback
-        try:
-            with self.engine.begin() as conn:
-                currentJob = self.searchJobById(Job.JobID)
-                if len(currentJob) == 0:
-                    conn.execute(
-                        self.peerJobTable.insert().values(
-                            {
-                                "JobID": Job.JobID,
-                                "Configuration": Job.Configuration,
-                                "Peer": Job.Peer,
+        with self.lock:
+            try:
+                with self.engine.begin() as conn:
+                    currentJob = self.searchJobById(Job.JobID)
+                    if len(currentJob) == 0:
+                        conn.execute(
+                            self.peerJobTable.insert().values(
+                                {
+                                    "JobID": Job.JobID,
+                                    "Configuration": Job.Configuration,
+                                    "Peer": Job.Peer,
+                                    "Field": Job.Field,
+                                    "Operator": Job.Operator,
+                                    "Value": Job.Value,
+                                    "CreationDate": datetime.now(),
+                                    "ExpireDate": None,
+                                    "Action": Job.Action
+                                }
+                            )
+                        )
+                        self.JobLogger.log(Job.JobID, Message=f"Job is created if {Job.Field} {Job.Operator} {Job.Value} then {Job.Action}")
+                    else:
+                        conn.execute(
+                            self.peerJobTable.update().values({
                                 "Field": Job.Field,
                                 "Operator": Job.Operator,
                                 "Value": Job.Value,
-                                "CreationDate": datetime.now(),
-                                "ExpireDate": None,
                                 "Action": Job.Action
-                            }
+                            }).where(self.peerJobTable.columns.JobID == Job.JobID)
                         )
-                    )
-                    self.JobLogger.log(Job.JobID, Message=f"Job is created if {Job.Field} {Job.Operator} {Job.Value} then {Job.Action}")
-                else:
-                    conn.execute(
-                        self.peerJobTable.update().values({
-                            "Field": Job.Field,
-                            "Operator": Job.Operator,
-                            "Value": Job.Value,
-                            "Action": Job.Action
-                        }).where(self.peerJobTable.columns.JobID == Job.JobID)
-                    )
-                    self.JobLogger.log(Job.JobID, Message=f"Job is updated from if {currentJob[0].Field} {currentJob[0].Operator} {currentJob[0].Value} then {currentJob[0].Action}; to if {Job.Field} {Job.Operator} {Job.Value} then {Job.Action}")
-            self.__getJobs()
-            conf = self.WireguardConfigurations.get(Job.Configuration)
-            if conf:
-                found_peer, peer_obj = conf.searchPeer(Job.Peer)
-                if found_peer and peer_obj:
-                    peer_obj.getJobs()
-            return True, list(
-                filter(lambda x: x.Configuration == Job.Configuration and x.Peer == Job.Peer and x.JobID == Job.JobID,
-                       self.Jobs))
-        except Exception as e:
-            traceback.print_exc()
-            return False, str(e)
+                        self.JobLogger.log(Job.JobID, Message=f"Job is updated from if {currentJob[0].Field} {currentJob[0].Operator} {currentJob[0].Value} then {currentJob[0].Action}; to if {Job.Field} {Job.Operator} {Job.Value} then {Job.Action}")
+                self.__getJobs()
+                conf = self.WireguardConfigurations.get(Job.Configuration)
+                if conf:
+                    found_peer, peer_obj = conf.searchPeer(Job.Peer)
+                    if found_peer and peer_obj:
+                        peer_obj.getJobs()
+                return True, list(
+                    filter(lambda x: x.Configuration == Job.Configuration and x.Peer == Job.Peer and x.JobID == Job.JobID,
+                           self.Jobs))
+            except Exception as e:
+                traceback.print_exc()
+                return False, str(e)
 
     def deleteJob(self, Job: PeerJob) -> tuple[bool, None] | tuple[bool, str]:
-        try:
-            if len(self.searchJobById(Job.JobID)) == 0:
-                return False, "Job does not exist"
-            with self.engine.begin() as conn:
-                conn.execute(
-                    self.peerJobTable.update().values(
-                        {
-                            "ExpireDate": datetime.now()
-                        }
-                    ).where(self.peerJobTable.columns.JobID == Job.JobID)
-                )
-                self.JobLogger.log(Job.JobID, Message=f"Job is removed due to being deleted or finished.")
-            self.__getJobs()
-            conf = self.WireguardConfigurations.get(Job.Configuration)
-            if conf:
-                found_peer, peer_obj = conf.searchPeer(Job.Peer)
-                if found_peer and peer_obj:
-                    peer_obj.getJobs()
-            return True, None
-        except Exception as e:
-            return False, str(e)
+        with self.lock:
+            try:
+                if len(self.searchJobById(Job.JobID)) == 0:
+                    return False, "Job does not exist"
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        self.peerJobTable.update().values(
+                            {
+                                "ExpireDate": datetime.now()
+                            }
+                        ).where(self.peerJobTable.columns.JobID == Job.JobID)
+                    )
+                    self.JobLogger.log(Job.JobID, Message=f"Job is removed due to being deleted or finished.")
+                self.__getJobs()
+                conf = self.WireguardConfigurations.get(Job.Configuration)
+                if conf:
+                    found_peer, peer_obj = conf.searchPeer(Job.Peer)
+                    if found_peer and peer_obj:
+                        peer_obj.getJobs()
+                return True, None
+            except Exception as e:
+                return False, str(e)
 
     def updateJobConfigurationName(self, ConfigurationName: str, NewConfigurationName: str) -> tuple[bool, str] | tuple[bool, None]:
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(
-                    self.peerJobTable.update().values({
-                        "Configuration": NewConfigurationName
-                    }).where(self.peerJobTable.columns.Configuration == ConfigurationName)
-                )
-            self.__getJobs()
-            return True, None
-        except Exception as e:
-            return False, str(e)
+        with self.lock:
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        self.peerJobTable.update().values({
+                            "Configuration": NewConfigurationName
+                        }).where(self.peerJobTable.columns.Configuration == ConfigurationName)
+                    )
+                self.__getJobs()
+                return True, None
+            except Exception as e:
+                return False, str(e)
     
     def getPeerJobLogs(self, configurationName):
         return self.JobLogger.getLogs(configurationName)
@@ -159,9 +167,12 @@ class PeerJobs:
     def runJob(self):
         with self.lock:
             self.cleanJob()
-            needToDelete = []
             self.__getJobs()
-            for job in self.Jobs:
+            current_jobs = list(self.Jobs)
+
+        needToDelete = []
+        for job in current_jobs:
+            try:
                 c = self.WireguardConfigurations.get(job.Configuration)
                 if c is not None:
                     f, fp = c.searchPeer(job.Peer)
@@ -208,22 +219,55 @@ class PeerJobs:
                     self.JobLogger.log(job.JobID, False,
                                   f"Somehow can't find this peer {job.Peer} from {job.Configuration} failed {job.Action}ed."
                                   )
-            for j in needToDelete:
-                self.deleteJob(j)
+            except Exception as e:
+                try:
+                    current_app.logger.error(f"Job {job.JobID} execution failed: {e}")
+                except Exception:
+                    pass
+                self.JobLogger.log(job.JobID, False, f"Job crashed: {e}")
+
+        for j in needToDelete:
+            self.deleteJob(j)
             
     def cleanJob(self, init = False):
         failingJobs = self.JobLogger.getFailingJobs()
         with self.engine.begin() as conn:
             for job in failingJobs:
+                job_id = job.get('JobID') if hasattr(job, 'get') else str(job)
+                job_detail = conn.execute(
+                    self.peerJobTable.select().where(self.peerJobTable.columns.JobID == job_id)
+                ).mappings().fetchone()
+                if not job_detail:
+                    continue
+
+                conf_name = job_detail.get('Configuration')
+                peer_id = job_detail.get('Peer')
+                action = job_detail.get('Action')
+
+                conf = self.WireguardConfigurations.get(conf_name)
+                peer_exists = False
+                if conf:
+                    f, _ = conf.searchPeer(peer_id)
+                    if f:
+                        peer_exists = True
+
+                # BUG-05: Never auto-delete active restriction jobs for existing peers
+                if action == "restrict" and peer_exists:
+                    try:
+                        current_app.logger.error(f"Job {job_id} for peer {peer_id} failed repeatedly (>10 times) but was NOT deleted because it is an active restriction job.")
+                    except Exception:
+                        pass
+                    continue
+
                 conn.execute(
                     self.peerJobTable.update().values(
                         {
                             "ExpireDate": datetime.now()
                         }
-                    ).where(self.peerJobTable.columns.JobID == job.get('JobID'))
+                    ).where(self.peerJobTable.columns.JobID == job_id)
                 )
-                self.JobLogger.deleteLogs(JobID=job.get('JobID'))
-                self.JobLogger.log(job.get('JobID'), Message=f"Job is removed due to being stale.")
+                self.JobLogger.deleteLogs(JobID=job_id)
+                self.JobLogger.log(job_id, Message=f"Job is removed due to being stale.")
         
 
 

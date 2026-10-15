@@ -12,6 +12,7 @@ import tempfile
 import sqlalchemy as db
 from sqlalchemy.schema import CreateTable
 from .DatabaseConnection import ConnectionString
+from .DashboardConfig import DashboardConfig
 
 def sync_interface_runtime(interface: str, protocol: str, conf_path: str) -> tuple[bool, str]:
     """
@@ -350,7 +351,7 @@ class GlobalBackupManager:
             _report_backup_progress(job_id, 80, "creating_manifest")
             manifest = {
                 "version": "1.0",
-                "dashboard_version": "v4.3.3",
+                "dashboard_version": getattr(DashboardConfig, 'DashboardVersion', 'v4.3.3'),
                 "timestamp": datetime.now().isoformat(),
                 "label": label,
                 "interfaces": interfaces_found,

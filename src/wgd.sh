@@ -393,6 +393,17 @@ install_wgd(){
     printf "[WGDashboard] Enter ./wgd.sh start to start the dashboard\n"
 }
 
+get_app_port() {
+  local port=""
+  if [ -f "wg-dashboard.ini" ]; then
+    port=$(grep -i '^[[:space:]]*app_port[[:space:]]*=' wg-dashboard.ini | head -n 1 | awk -F'=' '{print $2}' | tr -d ' \r\n\t')
+  fi
+  if [ -z "$port" ] || ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    port="10086"
+  fi
+  echo "$port"
+}
+
 check_wgd_status(){
   if test -f "$PID_FILE"; then
     local pid=$(cat "$PID_FILE" 2>/dev/null)
@@ -400,10 +411,9 @@ check_wgd_status(){
       return 0
     fi
   fi
-  if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
-    return 0
-  fi
-  if fuser 10086/tcp > /dev/null 2>&1; then
+  local port
+  port=$(get_app_port)
+  if fuser "${port}/tcp" > /dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -425,15 +435,17 @@ gunicorn_start () {
   fi
   ulimit -n 65535 2>/dev/null || true
   
-  # Ensure no orphaned gunicorn process is holding the port before starting
-  if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
-    pkill -TERM -f "gunicorn.*dashboard:app" 2>/dev/null || true
-    sleep 2
-    if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
-      pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
+  local port
+  port=$(get_app_port)
+  # Clean up existing PID if stale or still running
+  if test -f "$PID_FILE"; then
+    local old_pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      sudo kill -TERM "$old_pid" 2>/dev/null || true
+      sleep 1
     fi
   fi
-  fuser -k 10086/tcp 2>/dev/null || true
+  fuser -k "${port}/tcp" 2>/dev/null || true
   rm -f "$PID_FILE"
 
   _check_and_set_venv
@@ -462,9 +474,6 @@ gunicorn_stop () {
 	if test -f "$PID_FILE"; then
 		pid=$(cat "$PID_FILE" 2>/dev/null)
 	fi
-	if [ -z "$pid" ]; then
-		pid=$(pgrep -f "gunicorn.*dashboard:app" 2>/dev/null | head -n 1)
-	fi
 
 	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 		printf "[WGDashboard] Stopping WGDashboard w/ Gunicorn on PID %s" "$pid"
@@ -489,13 +498,9 @@ gunicorn_stop () {
 		sudo systemctl stop wg-dashboard 2>/dev/null || true
 	fi
 
-	if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
-		sleep 1
-		if pgrep -f "gunicorn.*dashboard:app" > /dev/null 2>&1; then
-			pkill -9 -f "gunicorn.*dashboard:app" 2>/dev/null || true
-		fi
-	fi
-	fuser -k 10086/tcp 2>/dev/null || true
+	local port
+	port=$(get_app_port)
+	fuser -k "${port}/tcp" 2>/dev/null || true
 	sudo rm -f "$PID_FILE"
 	
 	sleep 1
@@ -620,12 +625,17 @@ else
 	elif [ "$1" = "install-service" ] || [ "$1" = "service" ]; then
 		install_service
 	elif [ "$1" = "restart" ]; then
-		if check_wgd_status; then
-			stop_wgd
-			sleep 2
-			start_wgd
+		if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled wg-dashboard.service >/dev/null 2>&1 && [ -z "$INVOCATION_ID" ]; then
+			printf "[WGDashboard] Restarting via systemd...\n"
+			sudo systemctl restart wg-dashboard
 		else
-			start_wgd
+			if check_wgd_status; then
+				stop_wgd
+				sleep 2
+				start_wgd
+			else
+				start_wgd
+			fi
 		fi
 	elif [ "$1" = "debug" ]; then
 		if check_wgd_status; then

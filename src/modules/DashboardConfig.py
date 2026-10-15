@@ -249,9 +249,9 @@ class DashboardConfig:
         self.DashboardAPIKeys = self.__getAPIKeys()
 
     def __configValidation(self, section : str, key: str, value: Any) -> tuple[bool, str]:
-        if (type(value) is str and len(value) == 0
-                and section not in ['Email', 'WireGuardConfiguration'] and
-                (section == 'Peer' and key == 'peer_global_dns')):
+        if (type(value) is str and len(value.strip()) == 0
+                and section not in ['Email', 'WireGuardConfiguration']
+                and not (section == 'Peers' and key in ['peer_global_dns', 'peer_remote_endpoint'])):
             return False, "Field cannot be empty!"
         if section == "Peers" and key == "peer_global_dns" and len(value) > 0:
             return ValidateDNSAddress(value)
@@ -377,10 +377,10 @@ class DashboardConfig:
                 return True, list(filter(lambda x: len(x) > 0, self.__config[section][key].split("||")))
 
             val_str = str(self.__config[section][key]).strip().lower()
-            if val_str in ["1", "yes", "true", "on"]:
+            if val_str in ["yes", "true", "on"]:
                 return True, True
 
-            if val_str in ["0", "no", "false", "off"]:
+            if val_str in ["no", "false", "off"]:
                 return True, False
 
 

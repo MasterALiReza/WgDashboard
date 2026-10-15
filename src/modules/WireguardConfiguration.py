@@ -372,6 +372,23 @@ class WireguardConfiguration:
 
         self.metadata.create_all(self.engine)
 
+        # TU-03: Auto-heal any historic drift in traffic snapshot (e.g. from prior TU-01 where total_data > total_receive + total_sent)
+        try:
+            with self.engine.begin() as conn:
+                t = self.interfaceTrafficSnapshotTable
+                conn.execute(
+                    t.update()
+                    .where(
+                        (t.c.configuration_name == self.Name) &
+                        (t.c.total_data > (sqlalchemy.func.coalesce(t.c.total_receive, 0.0) + sqlalchemy.func.coalesce(t.c.total_sent, 0.0) + 0.0001))
+                    )
+                    .values(
+                        total_data=sqlalchemy.func.coalesce(t.c.total_receive, 0.0) + sqlalchemy.func.coalesce(t.c.total_sent, 0.0)
+                    )
+                )
+        except Exception:
+            pass
+
     def __dumpDatabase(self):
         with self.engine.connect() as conn:
             tables = [self.peersTable, self.peersRestrictedTable, self.peersTransferTable, self.peersDeletedTable, self.peersHistoryEndpointTable, self.interfaceTrafficSnapshotTable]
@@ -1071,13 +1088,13 @@ class WireguardConfiguration:
                             db_row = conn.execute(stmt_restricted).mappings().fetchone()
 
                         if db_row:
-                            peer_total_receive = float(db_row.get('cumu_receive') or 0.0) + float(db_row.get('total_receive') or 0.0)
-                            peer_total_sent    = float(db_row.get('cumu_sent') or 0.0) + float(db_row.get('total_sent') or 0.0)
-                            peer_total_data    = float(db_row.get('cumu_data') or 0.0) + float(db_row.get('total_data') or (peer_total_receive + peer_total_sent))
+                            peer_total_receive = max(0.0, float(db_row.get('cumu_receive') or 0.0) + float(db_row.get('total_receive') or 0.0))
+                            peer_total_sent    = max(0.0, float(db_row.get('cumu_sent') or 0.0) + float(db_row.get('total_sent') or 0.0))
+                            peer_total_data    = peer_total_receive + peer_total_sent
                         else:
-                            peer_total_receive = float(getattr(pf, 'cumu_receive', 0.0) or 0.0) + float(getattr(pf, 'total_receive', 0.0) or 0.0)
-                            peer_total_sent    = float(getattr(pf, 'cumu_sent', 0.0) or 0.0) + float(getattr(pf, 'total_sent', 0.0) or 0.0)
-                            peer_total_data    = float(getattr(pf, 'cumu_data', 0.0) or 0.0) + float(getattr(pf, 'total_data', 0.0) or 0.0)
+                            peer_total_receive = max(0.0, float(getattr(pf, 'cumu_receive', 0.0) or 0.0) + float(getattr(pf, 'total_receive', 0.0) or 0.0))
+                            peer_total_sent    = max(0.0, float(getattr(pf, 'cumu_sent', 0.0) or 0.0) + float(getattr(pf, 'total_sent', 0.0) or 0.0))
+                            peer_total_data    = peer_total_receive + peer_total_sent
 
                         batch_recv += peer_total_receive
                         batch_sent += peer_total_sent
@@ -1469,43 +1486,50 @@ class WireguardConfiguration:
                         p.total_data = total_receive + total_sent
 
             if any([hs_updates, ep_updates, cumu_updates, total_updates]):
-                with self.engine.begin() as conn:
-                    if hs_updates:
-                        stmt = self.peersTable.update().where(
-                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                        ).values(
-                            latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
-                            status=sqlalchemy.bindparam('b_status')
-                        )
-                        conn.execute(stmt, hs_updates)
+                def _execute_updates():
+                    with self.engine.begin() as conn:
+                        if hs_updates:
+                            stmt = self.peersTable.update().where(
+                                self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                            ).values(
+                                latest_handshake=sqlalchemy.bindparam('b_latest_handshake'),
+                                status=sqlalchemy.bindparam('b_status')
+                            )
+                            conn.execute(stmt, hs_updates)
 
-                    if ep_updates:
-                        stmt = self.peersTable.update().where(
-                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                        ).values(
-                            endpoint=sqlalchemy.bindparam('b_endpoint')
-                        )
-                        conn.execute(stmt, ep_updates)
+                        if ep_updates:
+                            stmt = self.peersTable.update().where(
+                                self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                            ).values(
+                                endpoint=sqlalchemy.bindparam('b_endpoint')
+                            )
+                            conn.execute(stmt, ep_updates)
 
-                    if cumu_updates:
-                        stmt = self.peersTable.update().where(
-                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                        ).values(
-                            cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
-                            cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
-                            cumu_data=sqlalchemy.bindparam('b_cumu_data')
-                        )
-                        conn.execute(stmt, cumu_updates)
+                        if cumu_updates:
+                            stmt = self.peersTable.update().where(
+                                self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                            ).values(
+                                cumu_receive=sqlalchemy.bindparam('b_cumu_receive'),
+                                cumu_sent=sqlalchemy.bindparam('b_cumu_sent'),
+                                cumu_data=sqlalchemy.bindparam('b_cumu_data')
+                            )
+                            conn.execute(stmt, cumu_updates)
 
-                    if total_updates:
-                        stmt = self.peersTable.update().where(
-                            self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
-                        ).values(
-                            total_receive=sqlalchemy.bindparam('b_total_receive'),
-                            total_sent=sqlalchemy.bindparam('b_total_sent'),
-                            total_data=sqlalchemy.bindparam('b_total_data')
-                        )
-                        conn.execute(stmt, total_updates)
+                        if total_updates:
+                            stmt = self.peersTable.update().where(
+                                self.peersTable.columns.id == sqlalchemy.bindparam('b_id')
+                            ).values(
+                                total_receive=sqlalchemy.bindparam('b_total_receive'),
+                                total_sent=sqlalchemy.bindparam('b_total_sent'),
+                                total_data=sqlalchemy.bindparam('b_total_data')
+                            )
+                            conn.execute(stmt, total_updates)
+
+                if cumu_updates:
+                    with self.lock:
+                        _execute_updates()
+                else:
+                    _execute_updates()
         except Exception as e:
             _logger.error(f"Error in refreshPeersRuntimeStats for {self.Name}: {e}")
 
@@ -1581,42 +1605,47 @@ class WireguardConfiguration:
 
     def _add_to_traffic_snapshot(self, conn, recv, sent, total):
         try:
-            recv = float(recv or 0.0)
-            sent = float(sent or 0.0)
-            total = float(total or 0.0)
+            recv = max(0.0, float(recv or 0.0))
+            sent = max(0.0, float(sent or 0.0))
+            total = max(0.0, float(total or (recv + sent)))
             if total <= 0.0 and recv <= 0.0 and sent <= 0.0:
                 return
 
-            existing = conn.execute(
-                self.interfaceTrafficSnapshotTable.select().where(
-                    self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name
+            t = self.interfaceTrafficSnapshotTable
+            now = datetime.now()
+            res = conn.execute(
+                t.update()
+                .where(t.c.configuration_name == self.Name)
+                .values(
+                    total_receive = sqlalchemy.func.coalesce(t.c.total_receive, 0.0) + recv,
+                    total_sent    = sqlalchemy.func.coalesce(t.c.total_sent, 0.0) + sent,
+                    total_data    = sqlalchemy.func.coalesce(t.c.total_data, 0.0) + total,
+                    last_updated  = now
                 )
-            ).mappings().first()
-            
-            if existing:
-                prev_recv  = float(existing.get('total_receive') or 0.0)
-                prev_sent  = float(existing.get('total_sent') or 0.0)
-                prev_total = float(existing.get('total_data') or 0.0)
-                conn.execute(
-                    self.interfaceTrafficSnapshotTable.update()
-                    .where(self.interfaceTrafficSnapshotTable.c.configuration_name == self.Name)
-                    .values(
-                        total_receive = prev_recv + recv,
-                        total_sent    = prev_sent + sent,
-                        total_data    = prev_total + total,
-                        last_updated  = datetime.now()
+            )
+            if res.rowcount == 0:
+                try:
+                    conn.execute(
+                        t.insert().values(
+                            configuration_name = self.Name,
+                            total_receive = recv,
+                            total_sent    = sent,
+                            total_data    = total,
+                            last_updated  = now
+                        )
                     )
-                )
-            else:
-                conn.execute(
-                    self.interfaceTrafficSnapshotTable.insert().values(
-                        configuration_name = self.Name,
-                        total_receive = recv,
-                        total_sent    = sent,
-                        total_data    = total,
-                        last_updated  = datetime.now()
+                except Exception:
+                    # In case of concurrent insert race, retry update
+                    conn.execute(
+                        t.update()
+                        .where(t.c.configuration_name == self.Name)
+                        .values(
+                            total_receive = sqlalchemy.func.coalesce(t.c.total_receive, 0.0) + recv,
+                            total_sent    = sqlalchemy.func.coalesce(t.c.total_sent, 0.0) + sent,
+                            total_data    = sqlalchemy.func.coalesce(t.c.total_data, 0.0) + total,
+                            last_updated  = now
+                        )
                     )
-                )
         except Exception as e:
             _logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
             raise e
@@ -1634,7 +1663,7 @@ class WireguardConfiguration:
             self._last_data_usage_time = 0.0
 
         now = time.time()
-        if (now - self._last_data_usage_time < 3.0) and self._last_data_usage.get("Total", 0.0) > 0:
+        if (now - self._last_data_usage_time < 3.0):
             return self._last_data_usage
 
         try:
@@ -1675,17 +1704,16 @@ class WireguardConfiguration:
                 s_recv  = float(snap.get('total_receive') or 0.0) if snap else 0.0
                 s_sent  = float(snap.get('total_sent') or 0.0)    if snap else 0.0
                 s_total = float(snap.get('total_data') or 0.0)    if snap else 0.0
+                if s_total > (s_recv + s_sent + 0.0001):
+                    s_total = s_recv + s_sent
 
             res = {
                 "Total":   a_total + r_total + s_total,
                 "Sent":    a_sent  + r_sent  + s_sent,
                 "Receive": a_recv  + r_recv  + s_recv,
             }
-            if res["Total"] > 0:
-                self._last_data_usage = res
-                self._last_data_usage_time = now
-            elif self._last_data_usage.get("Total", 0) > 0 and res["Total"] == 0:
-                return self._last_data_usage
+            self._last_data_usage = res
+            self._last_data_usage_time = now
             return res
         except Exception as e:
             _logger.error(f"{self.Name} _compute_data_usage() Error: {e}")

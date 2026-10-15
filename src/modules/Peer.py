@@ -535,9 +535,9 @@ class Peer:
                 cur_total = cur_recv + cur_sent
 
                 if mode == "total":
-                    peer_total_receive = float(cumu_recv or 0.0) + float(cur_recv or 0.0)
-                    peer_total_sent    = float(cumu_sent or 0.0) + float(cur_sent or 0.0)
-                    peer_total_data    = float(cumu_data or 0.0) + float(total_data or (cur_recv + cur_sent))
+                    peer_total_receive = max(0.0, float(cumu_recv or 0.0) + float(cur_recv or 0.0))
+                    peer_total_sent    = max(0.0, float(cumu_sent or 0.0) + float(cur_sent or 0.0))
+                    peer_total_data    = peer_total_receive + peer_total_sent
                     if peer_total_data > 0.0 or peer_total_receive > 0.0 or peer_total_sent > 0.0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, peer_total_sent, peer_total_data
@@ -578,7 +578,7 @@ class Peer:
                     self.cumu_sent = new_cumu_sent
                     self.cumu_receive = new_cumu_recv
                 elif mode == "receive":
-                    peer_total_receive = float(cumu_recv or 0.0) + float(cur_recv or 0.0)
+                    peer_total_receive = max(0.0, float(cumu_recv or 0.0) + float(cur_recv or 0.0))
                     if peer_total_receive > 0.0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, peer_total_receive, 0.0, peer_total_receive
@@ -610,7 +610,7 @@ class Peer:
                     self.total_data = cur_recv + cur_sent
                     self.cumu_data = new_cumu_recv + cumu_sent
                 elif mode == "sent":
-                    peer_total_sent = float(cumu_sent or 0.0) + float(cur_sent or 0.0)
+                    peer_total_sent = max(0.0, float(cumu_sent or 0.0) + float(cur_sent or 0.0))
                     if peer_total_sent > 0.0:
                         self.configuration._add_to_traffic_snapshot(
                             conn, 0.0, peer_total_sent, peer_total_sent

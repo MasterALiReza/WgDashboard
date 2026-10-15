@@ -1,4 +1,4 @@
-import logging
+import logging, hmac
 import random, shutil, sqlite3, configparser, hashlib, ipaddress, json, os, secrets, subprocess
 import time, re, uuid, bcrypt, psutil, pyotp, threading, signal
 import traceback
@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 import sqlalchemy
 from jinja2.sandbox import SandboxedEnvironment
 _jinja_env = SandboxedEnvironment()
-from flask import Flask, request, render_template, session, send_file, current_app, Response
+from flask import Flask, request, render_template, session, send_file, current_app, Response, g
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_cors import CORS
 from icmplib import ping, traceroute
 from flask.json.provider import DefaultJSONProvider
@@ -23,6 +24,8 @@ from modules.Utilities import (
     SimpleRateLimiter
 )
 admin_limiter = SimpleRateLimiter()
+_last_used_totp = {"code": None, "timestamp": 0}
+_last_used_totp_lock = threading.Lock()
 from packaging import version
 from modules.Email import EmailSender
 from modules.DashboardLogger import DashboardLogger
@@ -379,6 +382,12 @@ WireguardConfigurationsLock = threading.RLock()
 CONFIGURATION_PATH = os.getenv('CONFIGURATION_PATH', '.')
 
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 5206928
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_HTTPONLY=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12)
+)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.json = CustomJsonEncoder(app)
 with app.app_context():
     SystemStatus = SystemStatus()
@@ -396,14 +405,51 @@ with app.app_context():
     app.register_blueprint(createClientBlueprint(WireguardConfigurations, DashboardConfig, DashboardClients))
 
 _, APP_PREFIX = DashboardConfig.GetConfig("Server", "app_prefix")
-cors = CORS(app, resources={rf"{APP_PREFIX}/api/*": {
-    "origins": "*",
-    "methods": "DELETE, POST, GET, OPTIONS",
-    "allow_headers": ["Content-Type", "wg-dashboard-apikey"]
-}})
 _, app_ip = DashboardConfig.GetConfig("Server", "app_ip")
 _, app_port = DashboardConfig.GetConfig("Server", "app_port")
 _, WG_CONF_PATH = DashboardConfig.GetConfig("Server", "wg_conf_path")
+
+cors_origins_setting = DashboardConfig.GetConfig("Server", "cors_origins")[1] if DashboardConfig.GetConfig("Server", "cors_origins")[0] else None
+if cors_origins_setting and cors_origins_setting.strip() == "*":
+    cors_allowed = "*"
+elif cors_origins_setting and len(cors_origins_setting.strip()) > 0:
+    cors_allowed = [o.strip() for o in cors_origins_setting.split(",") if o.strip()]
+else:
+    cors_allowed = [
+        f"http://{app_ip}:{app_port}", f"https://{app_ip}:{app_port}",
+        f"http://127.0.0.1:{app_port}", f"https://127.0.0.1:{app_port}",
+        f"http://localhost:{app_port}", f"https://localhost:{app_port}"
+    ]
+
+cors = CORS(app, resources={rf"{APP_PREFIX}/api/*": {
+    "origins": cors_allowed,
+    "methods": "DELETE, POST, GET, OPTIONS",
+    "allow_headers": ["Content-Type", "wg-dashboard-apikey"]
+}})
+
+BOT_ALLOWED_ENDPOINTS = {
+    f"{APP_PREFIX}/api/getWireguardConfigurations",
+    f"{APP_PREFIX}/api/getWireguardConfigurationInfo",
+    f"{APP_PREFIX}/api/getAvailableIPs",
+    f"{APP_PREFIX}/api/downloadPeer",
+    f"{APP_PREFIX}/api/addPeers",
+    f"{APP_PREFIX}/api/updatePeerSettings",
+    f"{APP_PREFIX}/api/deletePeers",
+    f"{APP_PREFIX}/api/restrictPeers",
+    f"{APP_PREFIX}/api/allowAccessPeers",
+    f"{APP_PREFIX}/api/resetPeerData",
+    f"{APP_PREFIX}/api/savePeerScheduleJob",
+    f"{APP_PREFIX}/api/deletePeerScheduleJob",
+    f"{APP_PREFIX}/api/handshake",
+}
+
+def is_bot_endpoint_allowed(path: str) -> bool:
+    clean_path = path.rstrip("/")
+    for ep in BOT_ALLOWED_ENDPOINTS:
+        clean_ep = ep.rstrip("/")
+        if clean_path == clean_ep or clean_path.startswith(clean_ep + "/"):
+            return True
+    return False
 
 '''
 API Routes
@@ -419,34 +465,56 @@ def auth_req():
         if request.path.startswith('/api/'):
             return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
 
-    DashboardConfig.APIAccessed = False    
+    g.api_accessed = False
     authenticationRequired = DashboardConfig.GetConfig("Server", "auth_req")[1]
     d = request.headers
     if authenticationRequired:
         apiKey = d.get('wg-dashboard-apikey')
         apiKeyEnabled = DashboardConfig.GetConfig("Server", "dashboard_api_key")[1]
         if apiKey is not None and len(apiKey) > 0 and apiKeyEnabled:
-            apiKeyExist = len(list(filter(lambda x : x.Key == apiKey, DashboardConfig.DashboardAPIKeys))) == 1
+            now = datetime.now()
+            matching_keys = [
+                x for x in DashboardConfig.DashboardAPIKeys
+                if hmac.compare_digest(x.Key, apiKey)
+            ]
+            valid_keys = []
+            for k in matching_keys:
+                if k.ExpiredAt is None or k.ExpiredAt == "" or k.ExpiredAt == "None":
+                    valid_keys.append(k)
+                else:
+                    try:
+                        exp_dt = datetime.strptime(k.ExpiredAt, "%Y-%m-%d %H:%M:%S")
+                        if exp_dt > now:
+                            valid_keys.append(k)
+                    except Exception:
+                        pass
+
             masked_key = apiKey[:4] + "****" + apiKey[-4:] if len(apiKey) > 8 else "****"
-            if not apiKeyExist:
+            if len(valid_keys) != 1:
                 DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"Unauthorized API Key attempt: {masked_key}")
-                DashboardConfig.APIAccessed = False
+                g.api_accessed = False
                 response = Flask.make_response(app, {
                     "status": False,
-                    "message": "API Key does not exist",
+                    "message": "API Key does not exist or has expired",
                     "data": None
                 })
                 response.content_type = "application/json"
                 response.status_code = 401
                 return response
+
+            # Enforce bot allowlist (SEC-03)
+            if not is_bot_endpoint_allowed(request.path):
+                DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"API Key endpoint not allowed: {request.path}")
+                g.api_accessed = False
+                return ResponseObject(False, "API key not authorized for this endpoint", status_code=403)
             
             # For valid API keys: only log mutating actions (POST/PUT/DELETE/PATCH),
             # preventing millions of noisy log rows from continuous background GET polling.
             if request.method.upper() not in ('GET', 'HEAD', 'OPTIONS'):
                 DashboardLogger.log(str(request.url), str(request.remote_addr), Status="true", Message=f"API Action: {request.method} {request.path} - Key: {masked_key}")
-            DashboardConfig.APIAccessed = True
+            g.api_accessed = True
         else:
-            DashboardConfig.APIAccessed = False
+            g.api_accessed = False
             appPrefix = APP_PREFIX if len(APP_PREFIX) > 0 else ''
             whiteList = [
                 # f'/static/', 
@@ -461,17 +529,26 @@ def auth_req():
                 f'{appPrefix}/api/requireAuthentication',
                 f'{appPrefix}/api/handshake',
             ]
-        
 
-            if (    
-                    ("username" not in session or session.get("role") != "admin")
-                    and (f"{appPrefix}/" != request.path and f"{appPrefix}" != request.path)
-                    and not request.path.startswith(f'{appPrefix}/client')
-                    and not request.path.startswith(f'{appPrefix}/img')
-                    and not request.path.startswith(f'{appPrefix}/json')
-                    and not request.path.startswith(f'{appPrefix}/assets')
-                    and request.path not in whiteList
-            ):
+            is_public_path = (
+                (f"{appPrefix}/" == request.path or f"{appPrefix}" == request.path)
+                or request.path.startswith(f'{appPrefix}/client')
+                or request.path.startswith(f'{appPrefix}/img')
+                or request.path.startswith(f'{appPrefix}/json')
+                or request.path.startswith(f'{appPrefix}/assets')
+                or request.path in whiteList
+            )
+
+            is_admin = False
+            if "username" in session and session.get("role") == "admin":
+                current_epoch = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
+                cookie_token = request.cookies.get("authToken")
+                if session.get("session_epoch") == current_epoch and cookie_token and cookie_token == session.get("username"):
+                    is_admin = True
+                else:
+                    session.clear()
+
+            if not is_admin and not is_public_path:
                 response = Flask.make_response(app, {
                     "status": False,
                     "message": "Unauthorized access.",
@@ -479,6 +556,7 @@ def auth_req():
                 })
                 response.content_type = "application/json"
                 response.status_code = 401
+                response.delete_cookie("authToken")
                 return response
 
 @app.route(f'{APP_PREFIX}/api/handshake', methods=["GET", "OPTIONS"])
@@ -489,7 +567,8 @@ def API_Handshake():
 def API_ValidateAuthentication():
     token = request.cookies.get("authToken")
     if DashboardConfig.GetConfig("Server", "auth_req")[1]:
-        if token is None or token == "" or "username" not in session or session["username"] != token:
+        current_epoch = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
+        if token is None or token == "" or "username" not in session or session["username"] != token or session.get("session_epoch") != current_epoch:
             return ResponseObject(False, "Invalid authentication.")
     return ResponseObject(True)
 
@@ -500,49 +579,64 @@ def API_RequireAuthentication():
 @app.post(f'{APP_PREFIX}/api/authenticate')
 def API_AuthenticateLogin():
     ip = request.remote_addr
-    if admin_limiter.check_rate_limit(f"login_{ip}", limit=5, period=60):
+    if admin_limiter.is_rate_limited(f"login_{ip}", limit=5, period=60):
         DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login rate limited for IP: {ip}")
         return ResponseObject(False, "Too many login attempts. Please try again in a minute.", status_code=429)
 
-    data = request.get_json()
+    data = request.get_json() or {}
     if not DashboardConfig.GetConfig("Server", "auth_req")[1]:
         return ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
-    
-    if DashboardConfig.APIAccessed:
-        authToken = secrets.token_hex(32)
-        session['role'] = 'admin'
-        session['username'] = authToken
-        resp = ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
-        resp.set_cookie("authToken", authToken)
-        session.permanent = True
-        return resp
-    valid = bcrypt.checkpw(data['password'].encode("utf-8"),
-                           DashboardConfig.GetConfig("Account", "password")[1].encode("utf-8"))
+
+    valid = False
+    try:
+        valid = bcrypt.checkpw(str(data.get('password', '')).encode("utf-8"),
+                               DashboardConfig.GetConfig("Account", "password")[1].encode("utf-8"))
+    except Exception:
+        valid = False
+
     totpEnabled = DashboardConfig.GetConfig("Account", "enable_totp")[1]
     totpValid = False
     if totpEnabled:
-        totpValid = pyotp.TOTP(DashboardConfig.GetConfig("Account", "totp_key")[1]).now() == data['totp']
+        totp_code = str(data.get('totp') or '').strip()
+        totp_key = DashboardConfig.GetConfig("Account", "totp_key")[1]
+        with _last_used_totp_lock:
+            if totp_code and totp_code == _last_used_totp["code"] and (time.time() - _last_used_totp["timestamp"] < 60):
+                totpValid = False
+            else:
+                try:
+                    totpValid = pyotp.TOTP(totp_key).verify(totp_code, valid_window=1)
+                    if totpValid:
+                        _last_used_totp["code"] = totp_code
+                        _last_used_totp["timestamp"] = time.time()
+                except Exception:
+                    totpValid = False
 
     if (valid
-            and data['username'] == DashboardConfig.GetConfig("Account", "username")[1]
+            and data.get('username') == DashboardConfig.GetConfig("Account", "username")[1]
             and ((totpEnabled and totpValid) or not totpEnabled)
     ):
+        admin_limiter.reset(f"login_{ip}")
         authToken = secrets.token_hex(32)
         session['role'] = 'admin'
         session['username'] = authToken
-        resp = ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
-        resp.set_cookie("authToken", authToken)
+        session['session_epoch'] = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
         session.permanent = True
-        DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login success: {data['username']}")
+        resp = ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
+        resp.set_cookie("authToken", authToken, httponly=True, samesite="Lax")
+        DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login success: {data.get('username')}")
         return resp
-    DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login failed: {data['username']}")
+
+    admin_limiter.hit(f"login_{ip}", period=60)
+    DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login failed: {data.get('username')}")
     if totpEnabled:
         return ResponseObject(False, "Sorry, your username, password or OTP is incorrect.")
     else:
         return ResponseObject(False, "Sorry, your username or password is incorrect.")
 
-@app.get(f'{APP_PREFIX}/api/signout')
+@app.route(f'{APP_PREFIX}/api/signout', methods=["GET", "POST"])
 def API_SignOut():
+    if request.args.get("all") in ("true", "1"):
+        DashboardConfig.bump_session_epoch()
     resp = ResponseObject(True, "")
     resp.delete_cookie("authToken")
     session.clear()
@@ -594,11 +688,15 @@ def API_addWireguardConfiguration():
     if data.get("Protocol") not in ProtocolsEnabled():
         return ResponseObject(False, "Please provide a valid protocol: wg / awg.")
 
+    config_name = str(data.get("ConfigurationName", "")).strip()
+    if not re.match(r"^[a-zA-Z0-9_=\+\.\-]{1,15}$", config_name):
+        return ResponseObject(False, "Invalid configuration name. Must be 1-15 characters (letters, numbers, _, =, +, ., -).", "ConfigurationName")
+
     # Check duplicate names, ports, address
     for i in WireguardConfigurations.values():
-        if i.Name == data['ConfigurationName']:
+        if i.Name == config_name:
             return ResponseObject(False,
-                                  f"Already have a configuration with the name \"{data['ConfigurationName']}\"",
+                                  f"Already have a configuration with the name \"{config_name}\"",
                                   "ConfigurationName")
 
         if str(i.ListenPort) == str(data["ListenPort"]):
@@ -611,37 +709,39 @@ def API_addWireguardConfiguration():
                                   f"Already have a configuration with the address \"{data['Address']}\"",
                                   "Address")
 
-    if "Backup" in data.keys():
+    if "Backup" in data.keys() and data["Backup"]:
+        backup_name = os.path.basename(str(data["Backup"]))
         path = {
             "wg": DashboardConfig.GetConfig("Server", "wg_conf_path")[1],
             "awg": DashboardConfig.GetConfig("Server", "awg_conf_path")[1]
         }
      
-        if (os.path.exists(os.path.join(path['wg'], 'WGDashboard_Backup', data["Backup"])) and
-                os.path.exists(os.path.join(path['wg'], 'WGDashboard_Backup', data["Backup"].replace('.conf', '.sql')))):
+        if (os.path.exists(os.path.join(path['wg'], 'WGDashboard_Backup', backup_name)) and
+                os.path.exists(os.path.join(path['wg'], 'WGDashboard_Backup', backup_name.replace('.conf', '.sql')))):
             protocol = "wg"
-        elif (os.path.exists(os.path.join(path['awg'], 'WGDashboard_Backup', data["Backup"])) and
-              os.path.exists(os.path.join(path['awg'], 'WGDashboard_Backup', data["Backup"].replace('.conf', '.sql')))):
+        elif (os.path.exists(os.path.join(path['awg'], 'WGDashboard_Backup', backup_name)) and
+              os.path.exists(os.path.join(path['awg'], 'WGDashboard_Backup', backup_name.replace('.conf', '.sql')))):
             protocol = "awg"
         else:
             return ResponseObject(False, "Backup does not exist")
         
         shutil.copy(
-            os.path.join(path[protocol], 'WGDashboard_Backup', data["Backup"]),
-            os.path.join(path[protocol], f'{data["ConfigurationName"]}.conf')
+            os.path.join(path[protocol], 'WGDashboard_Backup', backup_name),
+            os.path.join(path[protocol], f'{config_name}.conf')
         )
-        WireguardConfigurations[data['ConfigurationName']] = (
-            WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, data=data, name=data['ConfigurationName'])) if protocol == 'wg' else (
-            AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, data=data, name=data['ConfigurationName']))
+        WireguardConfigurations[config_name] = (
+            WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, data=data, name=config_name)) if protocol == 'wg' else (
+            AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, data=data, name=config_name))
     else:
-        WireguardConfigurations[data['ConfigurationName']] = (
+        WireguardConfigurations[config_name] = (
             WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, data=data)) if data.get('Protocol') == 'wg' else (
             AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, data=data))
     return ResponseObject()
 
-@app.get(f'{APP_PREFIX}/api/toggleWireguardConfiguration')
+@app.route(f'{APP_PREFIX}/api/toggleWireguardConfiguration', methods=["GET", "POST"])
 def API_toggleWireguardConfiguration():
-    configurationName = request.args.get('configurationName')
+    data = request.get_json(silent=True) or {}
+    configurationName = request.args.get('configurationName') or data.get('configurationName')
     if configurationName is None or len(
             configurationName) == 0 or configurationName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Please provide a valid configuration name", status_code=404)
@@ -798,9 +898,10 @@ def API_getAllWireguardConfigurationBackup():
                         data['NonExistingConfigurations'][name].append(d)
     return ResponseObject(data=data)
 
-@app.get(f'{APP_PREFIX}/api/createWireguardConfigurationBackup')
+@app.route(f'{APP_PREFIX}/api/createWireguardConfigurationBackup', methods=["GET", "POST"])
 def API_createWireguardConfigurationBackup():
-    configurationName = request.args.get('configurationName')
+    data = request.get_json(silent=True) or {}
+    configurationName = request.args.get('configurationName') or data.get('configurationName')
     if configurationName is None or configurationName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Configuration does not exist",  status_code=404)
     return ResponseObject(status=WireguardConfigurations[configurationName].backupConfigurationFile()[0], 
@@ -1133,18 +1234,20 @@ def API_updateDashboardConfigurationItem():
             with WireguardConfigurationsLock:
                 WireguardConfigurations.clear()
             InitWireguardConfigurationsList()
+    if data.get('section') == "Account" and data.get('key') == "password":
+        session["session_epoch"] = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
     return ResponseObject(True, data=DashboardConfig.GetConfig(data["section"], data["key"])[1])
 
 @app.get(f'{APP_PREFIX}/api/getDashboardAPIKeys')
 def API_getDashboardAPIKeys():
-    if DashboardConfig.GetConfig('Server', 'dashboard_api_key'):
+    if DashboardConfig.GetConfig('Server', 'dashboard_api_key')[1]:
         return ResponseObject(data=DashboardConfig.DashboardAPIKeys)
     return ResponseObject(False, "WGDashboard API Keys function is disabled")
 
 @app.post(f'{APP_PREFIX}/api/newDashboardAPIKey')
 def API_newDashboardAPIKey():
     data = request.get_json()
-    if DashboardConfig.GetConfig('Server', 'dashboard_api_key'):
+    if DashboardConfig.GetConfig('Server', 'dashboard_api_key')[1]:
         try:
             if data['NeverExpire']:
                 expiredAt = None
@@ -1154,18 +1257,18 @@ def API_newDashboardAPIKey():
             return ResponseObject(True, data=DashboardConfig.DashboardAPIKeys)
         except Exception as e:
             return ResponseObject(False, str(e))
-    return ResponseObject(False, "Dashboard API Keys function is disbaled")
+    return ResponseObject(False, "Dashboard API Keys function is disabled")
 
 @app.post(f'{APP_PREFIX}/api/deleteDashboardAPIKey')
 def API_deleteDashboardAPIKey():
     data = request.get_json()
-    if DashboardConfig.GetConfig('Server', 'dashboard_api_key'):
+    if DashboardConfig.GetConfig('Server', 'dashboard_api_key')[1]:
         if len(data['Key']) > 0 and len(list(filter(lambda x : x.Key == data['Key'], DashboardConfig.DashboardAPIKeys))) > 0:
             DashboardConfig.deleteAPIKey(data['Key'])
             return ResponseObject(True, data=DashboardConfig.DashboardAPIKeys)
         else:
             return ResponseObject(False, "API Key does not exist", status_code=404)
-    return ResponseObject(False, "Dashboard API Keys function is disbaled")
+    return ResponseObject(False, "Dashboard API Keys function is disabled")
     
 @app.post(f'{APP_PREFIX}/api/updatePeerSettings/<configName>')
 def API_updatePeerSettings(configName):
@@ -1578,7 +1681,7 @@ def API_GetPeerHistoricalEndpoints():
         result = p.getEndpoints()
         geo = {}
         try:
-            r = requests.post(f"http://ip-api.com/batch?fields=city,country,lat,lon,query",
+            r = requests.post(f"https://ip-api.com/batch?fields=city,country,lat,lon,query",
                               data=json.dumps([x['endpoint'] for x in result]), timeout=10)
             d = r.json()
             
@@ -1814,7 +1917,7 @@ def API_ping_execute():
                     "geo": None
                 }
                 try:
-                    r = requests.get(f"http://ip-api.com/json/{result.address}?field=city", timeout=10)
+                    r = requests.get(f"https://ip-api.com/json/{result.address}?field=city", timeout=10)
                     data['geo'] = r.json()
                 except Exception as e:
                     pass
@@ -1856,7 +1959,7 @@ def API_traceroute_execute():
                         "max_rtt": hop.max_rtt
                     })
             try:
-                r = requests.post(f"http://ip-api.com/batch?fields=city,country,lat,lon,query",
+                r = requests.post(f"https://ip-api.com/batch?fields=city,country,lat,lon,query",
                                   data=json.dumps([x['ip'] for x in result]), timeout=10)
                 d = r.json()
                 for i in range(len(result)):
@@ -1901,7 +2004,7 @@ def API_isTotpEnabled():
         ResponseObject(data=DashboardConfig.GetConfig("Account", "enable_totp")[1] and DashboardConfig.GetConfig("Account", "totp_verified")[1]))
 
 
-@app.get(f'{APP_PREFIX}/api/Welcome_GetTotpLink')
+@app.route(f'{APP_PREFIX}/api/Welcome_GetTotpLink', methods=["GET", "POST"])
 def API_Welcome_GetTotpLink():
     if not DashboardConfig.GetConfig("Account", "totp_verified")[1]:
         DashboardConfig.SetConfig("Account", "totp_key", pyotp.random_base32(), True)
@@ -1913,12 +2016,18 @@ def API_Welcome_GetTotpLink():
 
 @app.post(f'{APP_PREFIX}/api/Welcome_VerifyTotpLink')
 def API_Welcome_VerifyTotpLink():
-    data = request.get_json()
-    totp = pyotp.TOTP(DashboardConfig.GetConfig("Account", "totp_key")[1]).now()
-    if totp == data['totp']:
+    data = request.get_json() or {}
+    totp_key = DashboardConfig.GetConfig("Account", "totp_key")[1]
+    totp_code = str(data.get('totp') or '').strip()
+    is_valid = False
+    try:
+        is_valid = pyotp.TOTP(totp_key).verify(totp_code, valid_window=1)
+    except Exception:
+        is_valid = False
+    if is_valid:
         DashboardConfig.SetConfig("Account", "totp_verified", "true")
         DashboardConfig.SetConfig("Account", "enable_totp", "true")
-    return ResponseObject(totp == data['totp'])
+    return ResponseObject(is_valid)
 
 @app.post(f'{APP_PREFIX}/api/Welcome_Finish')
 def API_Welcome_Finish():
@@ -1955,16 +2064,18 @@ class Locale:
         
     def getLanguage(self) -> dict | None:
         currentLanguage = DashboardConfig.GetConfig("Server", "dashboard_language")[1]
-        if currentLanguage == "en":
+        valid_ids = [x['lang_id'] for x in self.activeLanguages]
+        if currentLanguage not in valid_ids or currentLanguage == "en":
             return None
-        if os.path.exists(os.path.join(f"{self.localePath}{currentLanguage}.json")):
-            with open(os.path.join(f"{self.localePath}{currentLanguage}.json"), "r") as f:
-                return dict(json.loads(''.join(f.readlines())))
-        else:
-            return None
+        safe_path = os.path.join(self.localePath, f"{os.path.basename(currentLanguage)}.json")
+        if os.path.exists(safe_path):
+            with open(safe_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None
     
     def updateLanguage(self, lang_id):
-        if not os.path.exists(os.path.join(f"{self.localePath}{lang_id}.json")):
+        valid_ids = [x['lang_id'] for x in self.activeLanguages]
+        if lang_id not in valid_ids:
             DashboardConfig.SetConfig("Server", "dashboard_language", "en-US")
         else:
             DashboardConfig.SetConfig("Server", "dashboard_language", lang_id)
@@ -1999,32 +2110,41 @@ def API_Email_Send():
     body = str(data.get('Body') or '')
     subject = str(data.get('Subject') or '')
     download = None
-    if ("ConfigurationName" in data.keys() 
-            and "Peer" in data.keys()):
-        if data.get('ConfigurationName') in WireguardConfigurations.keys():
-            configuration = WireguardConfigurations.get(data.get('ConfigurationName'))
-            attachmentName = ""
-            if configuration is not None:
-                fp, p = configuration.searchPeer(data.get('Peer'))
-                if fp:
-                    try:
-                        template = _jinja_env.from_string(body)
-                        download = p.downloadPeer()
-                        body = template.render(peer=p.toJson(), configurationFile=download)
-                        subject = _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
-                    except Exception as e:
-                        return ResponseObject(False, f"Template rendering failed: {str(e)}")
+    attachment_path = None
+    attachmentName = ""
+    try:
+        if ("ConfigurationName" in data.keys() 
+                and "Peer" in data.keys()):
+            if data.get('ConfigurationName') in WireguardConfigurations.keys():
+                configuration = WireguardConfigurations.get(data.get('ConfigurationName'))
+                if configuration is not None:
+                    fp, p = configuration.searchPeer(data.get('Peer'))
+                    if fp:
+                        try:
+                            template = _jinja_env.from_string(body)
+                            download = p.downloadPeer()
+                            body = template.render(peer=p.toJson(), configurationFile=download)
+                            subject = _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
+                        except Exception as e:
+                            return ResponseObject(False, f"Template rendering failed: {str(e)}")
 
-                    if data.get('IncludeAttachment', False):
-                        u = str(uuid4())
-                        attachmentName = f'{u}.conf'
-                        with open(os.path.join('./attachments', attachmentName,), 'w+') as f:
-                            f.write(download['file'])   
-                        
-    
-    s, m = EmailSender.send(data.get('Receiver'), subject, body,  
-                            data.get('IncludeAttachment', False), (attachmentName if download else ''))
-    return ResponseObject(s, m)
+                        if data.get('IncludeAttachment', False):
+                            u = str(uuid4())
+                            attachmentName = f'{u}.conf'
+                            os.makedirs('./attachments', exist_ok=True)
+                            attachment_path = os.path.join('./attachments', attachmentName)
+                            with open(attachment_path, 'w', encoding='utf-8') as f:
+                                f.write(download['file'])   
+        
+        s, m = EmailSender.send(data.get('Receiver'), subject, body,  
+                                data.get('IncludeAttachment', False), (attachmentName if download and data.get('IncludeAttachment', False) else ''))
+        return ResponseObject(s, m)
+    finally:
+        if attachment_path and os.path.exists(attachment_path):
+            try:
+                os.remove(attachment_path)
+            except Exception:
+                pass
 
 @app.post(f'{APP_PREFIX}/api/email/preview')
 def API_Email_PreviewBody():
@@ -2062,9 +2182,9 @@ def API_ProtocolsEnabled():
 '''
 OIDC Controller
 '''
-@app.get(f'{APP_PREFIX}/api/oidc/toggle')
+@app.route(f'{APP_PREFIX}/api/oidc/toggle', methods=["GET", "POST"])
 def API_OIDC_Toggle():
-    data = request.args
+    data = request.get_json(silent=True) or request.args
     if not data.get('mode'):
         return ResponseObject(False, "Please provide mode")
     mode = data.get('mode')
@@ -2094,7 +2214,7 @@ def API_OIDC_Status():
 Client Controller
 '''
 
-@app.get(f'{APP_PREFIX}/api/clients/toggleStatus')
+@app.route(f'{APP_PREFIX}/api/clients/toggleStatus', methods=["GET", "POST"])
 def API_Clients_ToggleStatus():
     DashboardConfig.SetConfig("Clients", "enable",
                               not DashboardConfig.GetConfig("Clients", "enable")[1])

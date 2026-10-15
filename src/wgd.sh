@@ -364,7 +364,7 @@ install_wgd(){
     _installPythonVenv
     _installPythonPip
 	_checkWireguard
-    sudo chmod -R 755 /etc/wireguard/
+    sudo chmod 700 /etc/wireguard/ && sudo chmod 600 /etc/wireguard/*.conf 2>/dev/null || true
     
     _check_and_set_venv
     printf "[WGDashboard] %s Upgrading Python Package Manage (PIP)\n" "$install"

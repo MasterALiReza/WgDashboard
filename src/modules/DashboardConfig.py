@@ -18,15 +18,24 @@ class DashboardConfig:
 
     def __init__(self):
         self.lock = threading.RLock()
-        if not os.path.exists(DashboardConfig.ConfigurationFilePath):
+        file_existed = os.path.exists(DashboardConfig.ConfigurationFilePath)
+        file_size = os.path.getsize(DashboardConfig.ConfigurationFilePath) if file_existed else 0
+        if not file_existed:
             open(DashboardConfig.ConfigurationFilePath, "x")
         self.__config = configparser.RawConfigParser(strict=False)
-        self.__config.read_file(open(DashboardConfig.ConfigurationFilePath, "r+"))
-        self.hiddenAttribute = ["totp_key", "auth_req"]
+        self.__config.read_file(open(DashboardConfig.ConfigurationFilePath, "r+", encoding="utf-8"))
+
+        if file_existed and file_size > 0 and "Account" not in self.__config.sections():
+            raise RuntimeError("Corrupted wg-dashboard.ini: missing [Account] section. Aborting to prevent credential reset.")
+
+        self.readOnlyAttribute = ["totp_key", "auth_req", "flask_secret_key", "session_epoch"]
+        self.hiddenFromRead = ["totp_key", "auth_req", "flask_secret_key", "password", "email_password", "session_epoch"]
+        self.hiddenAttribute = self.hiddenFromRead
         self.__default = {
             "Account": {
                 "username": "admin",
                 "password": "admin",
+                "session_epoch": "1",
                 "enable_totp": "false",
                 "totp_verified": "false",
                 "totp_key": pyotp.random_base32()
@@ -84,8 +93,8 @@ class DashboardConfig:
                 "client_enable": "false"
             },
             "Clients": {
-                "enable": "true",
-                "sign_up": "true"
+                "enable": "false",
+                "sign_up": "false"
             },
             "WireGuardConfiguration": {
                 "autostart": "",
@@ -276,7 +285,7 @@ class DashboardConfig:
 
     def SetConfig(self, section: str, key: str, value: str | bool | list[str] | dict[str, str], init: bool = False) -> tuple[bool, str] | tuple[bool, None]:
         with self.lock:
-            if key in self.hiddenAttribute and not init:
+            if key in self.readOnlyAttribute and not init:
                 return False, None
 
             if not init:
@@ -287,6 +296,11 @@ class DashboardConfig:
             if section == "Account" and key == "password":
                 if not init:
                     value = self.generatePassword(value["newPassword"]).decode("utf-8")
+                    try:
+                        cur_epoch = int(self.__config.get("Account", "session_epoch", fallback="1") or 1)
+                    except Exception:
+                        cur_epoch = 1
+                    self.__config["Account"]["session_epoch"] = str(cur_epoch + 1)
                 else:
                     value = self.generatePassword(value).decode("utf-8")
 
@@ -323,11 +337,30 @@ class DashboardConfig:
     def SaveConfig(self) -> bool:
         with self.lock:
             try:
-                with open(DashboardConfig.ConfigurationFilePath, "w+", encoding='utf-8') as configFile:
+                tmp = DashboardConfig.ConfigurationFilePath + ".tmp"
+                with open(tmp, "w", encoding='utf-8') as configFile:
                     self.__config.write(configFile)
+                    configFile.flush()
+                    os.fsync(configFile.fileno())
+                try:
+                    os.chmod(tmp, 0o600)
+                except Exception:
+                    pass
+                os.replace(tmp, DashboardConfig.ConfigurationFilePath)
                 return True
             except Exception as e:
                 return False
+
+    def bump_session_epoch(self) -> str:
+        with self.lock:
+            try:
+                cur = int(self.GetConfig("Account", "session_epoch")[1] or "1")
+            except Exception:
+                cur = 1
+            new_epoch = str(cur + 1)
+            self.SetConfig("Account", "session_epoch", new_epoch, init=True)
+            self.SaveConfig()
+            return new_epoch
 
     def GetConfig(self, section, key) ->tuple[bool, bool] | tuple[bool, str] | tuple[bool, list[str]] | tuple[bool, None]:
         with self.lock:
@@ -360,6 +393,8 @@ class DashboardConfig:
             for section in self.__config.sections():
                 the_dict[section] = {}
                 for key, val in self.__config.items(section):
-                    if key not in self.hiddenAttribute:
+                    if key not in self.hiddenFromRead:
                         the_dict[section][key] = self.GetConfig(section, key)[1]
+                    elif key in ["password", "email_password"]:
+                        the_dict[section][key] = "***" if self.GetConfig(section, key)[1] else ""
             return the_dict

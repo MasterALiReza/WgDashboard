@@ -1,7 +1,7 @@
 <script setup async>
 import {computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import {useRoute} from "vue-router";
-import {fetchGet} from "@/utilities/fetch.js";
+import {fetchGet, fetchPost} from "@/utilities/fetch.js";
 import ProtocolBadge from "@/components/protocolBadge.vue";
 import LocaleText from "@/components/text/localeText.vue";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
@@ -136,7 +136,7 @@ watch(() => {
 // Toggle Configuration Method =====================================
 const toggleConfiguration = async () => {
 	configurationToggling.value = true;
-	await fetchGet("/api/toggleWireguardConfiguration", {
+	await fetchPost("/api/toggleWireguardConfiguration", {
 		configurationName: configurationInfo.value.Name
 	}, (res) => {
 		if (res.status){

@@ -16,7 +16,7 @@ import logging
 from .PeerJob import PeerJob
 from flask import current_app
 from .PeerShareLink import PeerShareLink
-from .Utilities import GenerateWireguardPublicKey, GenerateWireguardPrivateKey, CheckAddress, ValidateDNSAddress
+from .Utilities import GenerateWireguardPublicKey, GenerateWireguardPrivateKey, CheckAddress, ValidateDNSAddress, write_psk_tmp
 
 _fallback_logger = logging.getLogger("WGDashboard")
 
@@ -128,14 +128,12 @@ class Peer:
                     return False, "Private key does not match with the public key"
 
             try:
-                rand = random.Random()
-                uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
+                uid = None
                 psk_exist = len(preshared_key) > 0
 
                 try:
                     if psk_exist:
-                        with open(uid, "w") as f:
-                            f.write(preshared_key)
+                        uid = write_psk_tmp(preshared_key)
 
                     newAllowedIPs = allowed_ip.replace(" ", "")
                     if not CheckAddress(newAllowedIPs):
@@ -144,7 +142,7 @@ class Peer:
                     command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
                     updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
                 finally:
-                    if psk_exist and os.path.exists(uid):
+                    if uid and os.path.exists(uid):
                         try:
                             os.remove(uid)
                         except Exception:
@@ -218,12 +216,10 @@ class Peer:
                 cmd_remove = [self.configuration.Protocol, "set", self.configuration.Name, "peer", old_id, "remove"]
                 subprocess.run(cmd_remove, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
 
-                rand = random.Random()
-                uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
+                uid = None
                 try:
                     if psk_exist:
-                        with open(uid, "w") as f:
-                            f.write(psk)
+                        uid = write_psk_tmp(psk)
                     clean_allowed_ips = (self.allowed_ip or "").replace(" ", "")
                     cmd_add = [
                         self.configuration.Protocol, "set", self.configuration.Name,
@@ -235,7 +231,7 @@ class Peer:
                         cmd_add.extend(["persistent-keepalive", str(self.keepalive)])
                     subprocess.run(cmd_add, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
                 finally:
-                    if psk_exist and os.path.exists(uid):
+                    if uid and os.path.exists(uid):
                         try:
                             os.remove(uid)
                         except Exception:

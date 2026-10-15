@@ -1,4 +1,4 @@
-import re, ipaddress
+import re, ipaddress, os, time, threading, tempfile
 import subprocess
 import sqlalchemy
 
@@ -263,10 +263,49 @@ class ProcessLock:
             self.thread_lock.release()
 
 
+def write_psk_tmp(psk: str) -> str:
+    """Safely write pre-shared key (PSK) to an atomic temp file with 0600 permissions (SEC-10)."""
+    tmp_dir = "/run" if os.path.exists("/run") and os.path.isdir("/run") else None
+    fd, path = tempfile.mkstemp(prefix="wgd_psk_", dir=tmp_dir)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(psk)
+    return path
+
+
 class SimpleRateLimiter:
     def __init__(self):
         self._lock = threading.RLock()
         self._requests = {}
+
+    def is_rate_limited(self, key: str, limit: int = 5, period: int = 60) -> bool:
+        """Returns True if the rate limit is exceeded without recording a hit (SEC-07)."""
+        now = time.time()
+        with self._lock:
+            timestamps = self._requests.get(key, [])
+            timestamps = [t for t in timestamps if now - t < period]
+            self._requests[key] = timestamps
+            return len(timestamps) >= limit
+
+    def hit(self, key: str, period: int = 60):
+        """Records a failed attempt or request hit (SEC-07)."""
+        now = time.time()
+        with self._lock:
+            timestamps = self._requests.get(key, [])
+            timestamps = [t for t in timestamps if now - t < period]
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            if len(self._requests) > 10000:
+                self._cleanup_all(now, period)
+
+    def reset(self, key: str):
+        """Resets the rate limit counter for a specific key (e.g. on successful login)."""
+        with self._lock:
+            if key in self._requests:
+                del self._requests[key]
 
     def check_rate_limit(self, key: str, limit: int = 5, period: int = 60) -> bool:
         """Returns True if the rate limit is exceeded (i.e. blocked), False otherwise."""
@@ -291,3 +330,4 @@ class SimpleRateLimiter:
                 keys_to_delete.append(k)
         for k in keys_to_delete:
             del self._requests[k]
+

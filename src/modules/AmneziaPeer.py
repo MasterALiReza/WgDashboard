@@ -7,7 +7,7 @@ import uuid
 
 from flask import current_app
 from .Peer import Peer
-from .Utilities import CheckAddress, ValidateDNSAddress, GenerateWireguardPublicKey
+from .Utilities import CheckAddress, ValidateDNSAddress, GenerateWireguardPublicKey, write_psk_tmp
 
 
 class AmneziaPeer(Peer):
@@ -71,8 +71,7 @@ class AmneziaPeer(Peer):
                 return False, "Private key does not match with the public key"
     
         try:
-            rand = random.Random()
-            uid = f"/tmp/wgd_psk_{uuid.UUID(int=rand.getrandbits(128), version=4).hex}"
+            uid = None
             psk_exist = len(preshared_key) > 0
 
             newAllowedIPs = allowed_ip.replace(" ", "")
@@ -81,13 +80,12 @@ class AmneziaPeer(Peer):
 
             try:
                 if psk_exist:
-                    with open(uid, "w") as f:
-                        f.write(preshared_key)
+                    uid = write_psk_tmp(preshared_key)
 
                 command = [self.configuration.Protocol, "set", self.configuration.Name, "peer", self.id, "allowed-ips", newAllowedIPs, "preshared-key", uid if psk_exist else "/dev/null"]
                 updateAllowedIp = subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
             finally:
-                if psk_exist and os.path.exists(uid):
+                if uid and os.path.exists(uid):
                     try:
                         os.remove(uid)
                     except Exception:

@@ -38,7 +38,8 @@ from .Utilities import StringToBoolean, \
     ValidateEndpointAllowedIPs, \
     CheckAddress, \
     CheckPeerKey, \
-    ProcessLock
+    ProcessLock, \
+    write_psk_tmp
 from .WireguardConfigurationInfo import WireguardConfigurationInfo, PeerGroupsClass
 from .DashboardWebHooks import DashboardWebHooks
 
@@ -702,18 +703,16 @@ class WireguardConfiguration:
                 try:
                     for p in peers:
                         presharedKeyExist = bool(p.get('preshared_key'))
-                        rd = random.Random()
-                        uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
+                        uid = None
                         try:
                             if presharedKeyExist:
-                                with open(uid, "w") as f:
-                                    f.write(p['preshared_key'])
+                                uid = write_psk_tmp(p['preshared_key'])
 
                             command = [self.Protocol, "set", self.Name, "peer", p['id'], "allowed-ips", cleanedAllowedIPs[p["id"]], "preshared-key", uid if presharedKeyExist else "/dev/null"]
                             subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
                             applied_keys_to_kernel.append(p['id'])
                         finally:
-                            if presharedKeyExist and os.path.exists(uid):
+                            if uid and os.path.exists(uid):
                                 try:
                                     os.remove(uid)
                                 except Exception:
@@ -832,8 +831,7 @@ class WireguardConfiguration:
             failed_count = 0
             for restrictedPeer in peers_to_allow:
                 presharedKeyExist = len(restrictedPeer.get('preshared_key', '')) > 0
-                rd = random.Random()
-                uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
+                uid = None
                 newAllowedIPs = restrictedPeer['allowed_ip'].replace(" ", "")
                 if not CheckAddress(newAllowedIPs) or not CheckPeerKey(restrictedPeer["id"]):
                     failed_count += 1
@@ -841,8 +839,7 @@ class WireguardConfiguration:
 
                 try:
                     if presharedKeyExist:
-                        with open(uid, "w") as f:
-                            f.write(restrictedPeer['preshared_key'])
+                        uid = write_psk_tmp(restrictedPeer['preshared_key'])
 
                     command = [self.Protocol, "set", self.Name, "peer", restrictedPeer["id"], "allowed-ips", newAllowedIPs, "preshared-key", uid if presharedKeyExist else "/dev/null"]
                     subprocess.check_output(command, stderr=subprocess.STDOUT, timeout=15)
@@ -851,7 +848,7 @@ class WireguardConfiguration:
                     _logger.error(f"Error applying WireGuard config for peer {restrictedPeer.get('id')}: {e}")
                     failed_count += 1
                 finally:
-                    if presharedKeyExist and os.path.exists(uid):
+                    if uid and os.path.exists(uid):
                         try:
                             os.remove(uid)
                         except Exception:
@@ -1179,12 +1176,10 @@ class WireguardConfiguration:
                     if psk in ["None", "null", "(none)", "N/A"]:
                         psk = ""
                     psk_exist = bool(psk and CheckPeerKey(psk))
-                    rd = random.Random()
-                    uid = f"/tmp/wgd_psk_{uuid.UUID(int=rd.getrandbits(128), version=4).hex}"
+                    uid = None
                     try:
                         if psk_exist:
-                            with open(uid, "w") as f:
-                                f.write(psk)
+                            uid = write_psk_tmp(psk)
 
                         cmd = [
                             self.Protocol, "set", self.Name,
@@ -1208,7 +1203,7 @@ class WireguardConfiguration:
                         _logger.error(f"Reconcile: failed to restore peer {pid_clean}: {err}")
                         results["errors"].append(f"Failed to restore peer {pid_clean}: {err}")
                     finally:
-                        if psk_exist and os.path.exists(uid):
+                        if uid and os.path.exists(uid):
                             try:
                                 os.remove(uid)
                             except Exception:

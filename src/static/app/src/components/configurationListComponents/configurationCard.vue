@@ -1,5 +1,5 @@
 <script>
-import {fetchGet} from "@/utilities/fetch.js";
+import {fetchGet, fetchPost} from "@/utilities/fetch.js";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
 import LocaleText from "@/components/text/localeText.vue";
 import ProtocolBadge from "@/components/protocolBadge.vue";
@@ -28,7 +28,7 @@ export default {
 	methods: {
 		toggle(){
 			this.configurationToggling = true;
-			fetchGet("/api/toggleWireguardConfiguration", {
+			fetchPost("/api/toggleWireguardConfiguration", {
 				configurationName: this.c.Name
 			}, (res) => {
 				if (res.status){

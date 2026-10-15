@@ -10,7 +10,7 @@ export default {
 	async setup(){
 		const store = DashboardConfigurationStore();
 		let l = ""
-		await fetchGet("/api/Welcome_GetTotpLink", {}, (res => {
+		await fetchPost("/api/Welcome_GetTotpLink", {}, (res => {
 			if (res.status) l = res.data;
 		}));
 		return {l, store}

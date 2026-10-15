@@ -13,7 +13,10 @@ export const axiosPost = async (URL, body = {}) => {
 		return res.data
 	} catch (error){
 		console.log(error)
-		return undefined
+		if (error.response && error.response.data) {
+			return error.response.data
+		}
+		return { status: false, message: error.message || "Network error" }
 	}
 }
 
@@ -23,6 +26,9 @@ export const axiosGet = async (URL, query = {}) => {
 		return res.data
 	} catch (error){
 		console.log(error)
-		return undefined
+		if (error.response && error.response.data) {
+			return error.response.data
+		}
+		return { status: false, message: error.message || "Network error" }
 	}
 }

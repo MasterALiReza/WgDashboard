@@ -1,5 +1,5 @@
 import {defineStore} from "pinia";
-import {fetchGet} from "@/utilities/fetch.js";
+import {fetchGet, fetchPost} from "@/utilities/fetch.js";
 import {v4} from "uuid";
 import {GetLocale} from "@/utilities/locale.js";
 
@@ -74,7 +74,7 @@ export const DashboardConfigurationStore = defineStore('DashboardConfigurationSt
 			});
 		},
 		async signOut(){
-			await fetchGet("/api/signout", {}, () => {
+			await fetchPost("/api/signout", {}, () => {
 				this.removeActiveCrossServer();
 				document.cookie = '';
 				this.$router.go('/signin')

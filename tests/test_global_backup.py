@@ -466,3 +466,144 @@ def test_backup_concurrency_lock():
         finally:
             gb._is_backup_running = False
 
+
+# -----------------------------------------------------------------------------
+# GB-08: Dollar-quote SQL statement parsing
+# -----------------------------------------------------------------------------
+def test_split_sql_statements_dollar_quotes():
+    sql = """
+    CREATE OR REPLACE FUNCTION test_func() RETURNS void AS $$
+    BEGIN
+        SELECT 1;
+        INSERT INTO audit_log VALUES ('stmt; with; semicolon');
+    END;
+    $$ LANGUAGE plpgsql;
+    SELECT * FROM audit_log;
+    """
+    stmts = split_sql_statements(sql)
+    assert len(stmts) == 2
+    assert "LANGUAGE plpgsql" in stmts[0]
+    assert stmts[1] == "SELECT * FROM audit_log"
+
+
+# -----------------------------------------------------------------------------
+# GB-03 & GB-14: Backup creation includes plugins and per_config in manifest
+# -----------------------------------------------------------------------------
+def test_create_global_backup_manifest_includes_plugins_and_per_config(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    plugins_dir = config_dir / "plugins" / "custom_tool"
+    plugins_dir.mkdir(parents=True)
+    plugin_file = plugins_dir / "plugin.json"
+    plugin_file.write_text('{"name": "test_plugin"}', encoding="utf-8")
+
+    wg_dir = tmp_path / "wireguard"
+    wg_dir.mkdir()
+    conf_file = wg_dir / "wg0.conf"
+    conf_file.write_text("[Interface]\nAddress = 10.0.0.1/24\n", encoding="utf-8")
+    b_dir = wg_dir / "WGDashboard_Backup"
+    b_dir.mkdir()
+    b_file = b_dir / "wg0_backup_1.conf"
+    b_file.write_text("[Interface]\nAddress = 10.0.0.1/24\n# backup", encoding="utf-8")
+
+    ini_file = config_dir / "wg-dashboard.ini"
+    ini_file.write_text(f"""[Server]
+wg_conf_path = {wg_dir}
+awg_conf_path = /nonexistent
+""", encoding="utf-8")
+
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+
+    with patch.dict(os.environ, {
+        "GLOBAL_BACKUP_PATH": str(backups_dir),
+        "CONFIGURATION_PATH": str(config_dir)
+    }), \
+    patch("modules.GlobalBackup.dump_database_to_sql", return_value="-- empty"):
+
+        success, result = GlobalBackupManager.create_global_backup(
+            label="PluginTest",
+            include_existing_backups=True
+        )
+        assert success is True, f"create_global_backup failed: {result}"
+        zip_path = os.path.join(str(backups_dir), result["filename"])
+        
+        # Verify archive validates strictly against manifest with zero rogue files
+        valid, val_res = GlobalBackupManager.validate_backup_manifest(zip_path)
+        assert valid is True, f"validate_backup_manifest failed: {val_res}"
+
+
+# -----------------------------------------------------------------------------
+# GB-06 & GB-04: Restore reports unmanaged interfaces and script hooks
+# -----------------------------------------------------------------------------
+def test_restore_reports_unmanaged_local_confs_and_script_hooks(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    target_wg = tmp_path / "wireguard_target"
+    target_wg.mkdir()
+
+    # Pre-existing interface on host that is NOT in the backup
+    unmanaged_conf = target_wg / "wg99.conf"
+    unmanaged_conf.write_text("[Interface]\nAddress = 10.99.0.1/24\n", encoding="utf-8")
+
+    # Backup interface with a PostUp script hook
+    hooked_conf = b"[Interface]\nPrivateKey = aaaa\nAddress = 10.0.0.1/24\nPostUp = /opt/scripts/firewall.sh\n"
+    zip_path = tmp_path / "GlobalBackup_hooked.zip"
+    manifest = {
+        "version": "1.0",
+        "dashboard_version": "v4.3.4",
+        "timestamp": "2026-10-15T12:00:00",
+        "files": [
+            {"path": "configs/wireguard/wg0.conf",
+             "sha256": hashlib.sha256(hooked_conf).hexdigest(),
+             "size": len(hooked_conf)}
+        ]
+    }
+
+    with zipfile.ZipFile(str(zip_path), "w") as z:
+        z.writestr("MANIFEST.json", json.dumps(manifest))
+        z.writestr("configs/wireguard/wg0.conf", hooked_conf)
+
+    host_ini = config_dir / "wg-dashboard.ini"
+    host_ini.write_text(f"""[Server]
+wg_conf_path = {target_wg}
+""", encoding="utf-8")
+
+    with patch.dict(os.environ, {"CONFIGURATION_PATH": str(config_dir), "GLOBAL_BACKUP_PATH": str(tmp_path / "backups")}), \
+         patch("modules.GlobalBackup.sync_interface_runtime", return_value=(True, "ok")), \
+         patch.object(GlobalBackupManager, "create_global_backup", return_value=(True, "mock safety backup")):
+
+        success, note_msg = GlobalBackupManager.restore_global_backup(str(zip_path))
+        assert success is True
+        assert "Unmanaged local interfaces preserved" in note_msg
+        assert "wg99" in note_msg
+        assert "Script hooks present in restored configs" in note_msg
+        assert "PostUp" in note_msg
+
+
+# -----------------------------------------------------------------------------
+# GB-04: Delete filename validation rejects path traversal and invalid prefix
+# -----------------------------------------------------------------------------
+def test_delete_filename_validation(tmp_path):
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    valid_file = backups_dir / "GlobalBackup_20261015_010000_Test.zip"
+    valid_file.write_bytes(b"dummy zip")
+
+    with patch.dict(os.environ, {"GLOBAL_BACKUP_PATH": str(backups_dir)}):
+        # 1. Path traversal attempt must be rejected
+        assert GlobalBackupManager.delete_global_backup("../../../etc/passwd") is False
+        assert GlobalBackupManager.delete_global_backup("..\\..\\secret.txt") is False
+
+        # 2. Non-GlobalBackup file must be rejected
+        other_file = backups_dir / "other_archive.zip"
+        other_file.write_bytes(b"dummy")
+        assert GlobalBackupManager.delete_global_backup("other_archive.zip") is False
+        assert other_file.exists()
+
+        # 3. Valid GlobalBackup filename is successfully deleted
+        assert GlobalBackupManager.delete_global_backup("GlobalBackup_20261015_010000_Test.zip") is True
+        assert not valid_file.exists()
+
+
+

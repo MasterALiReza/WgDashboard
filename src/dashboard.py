@@ -295,7 +295,8 @@ def globalBackupBackgroundThread():
                             if can_run:
                                 try:
                                     app.logger.info(f"Starting scheduled global backup ({schedule})")
-                                    success, result = GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
+                                    with WireguardConfigurationsLock:
+                                        success, result = GlobalBackupManager.create_global_backup(label=f"Auto_{schedule}")
                                     if success:
                                         last_backup_time = now
                                         app.logger.info(f"Scheduled global backup completed successfully: {result.get('filename') if isinstance(result, dict) else result}")
@@ -1020,12 +1021,13 @@ def API_createGlobalBackup():
 
     def _do_backup(jid: str, lbl: str, inc_logs: bool, inc_ext: bool):
         try:
-            status, result = GlobalBackupManager.create_global_backup(
-                label=lbl,
-                include_logs=inc_logs,
-                include_existing_backups=inc_ext,
-                job_id=jid
-            )
+            with WireguardConfigurationsLock:
+                status, result = GlobalBackupManager.create_global_backup(
+                    label=lbl,
+                    include_logs=inc_logs,
+                    include_existing_backups=inc_ext,
+                    job_id=jid
+                )
             with _backup_jobs_lock:
                 if status:
                     _backup_jobs[jid].update({"done": True, "pct": 100, "step": "done", "filename": result.get("filename"), "finished_at": datetime.utcnow()})
@@ -1046,19 +1048,25 @@ def API_createGlobalBackup():
 @app.get(f'{APP_PREFIX}/api/globalBackup/create/progress/<job_id>')
 def API_createGlobalBackup_progress(job_id):
     def event_stream():
-        while True:
+        # GB-11: 15-minute timeout (900 seconds) with periodic keepalive
+        for i in range(900):
             _cleanup_expired_jobs()
             with _backup_jobs_lock:
                 info = _backup_jobs.get(job_id)
             
             if not info:
-                yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
+                yield f"data: {json.dumps({'error': 'Job not found', 'done': True})}\n\n"
                 break
                 
             yield f"data: {json.dumps(info, default=str)}\n\n"
             
             if info.get("done"):
                 break
+
+            # SSE comment keepalive every 15s
+            if i % 15 == 0:
+                yield ": keepalive\n\n"
+
             time.sleep(1)
             
     return Response(event_stream(), mimetype="text/event-stream")
@@ -1070,7 +1078,11 @@ def API_deleteGlobalBackup():
     if not filename:
         return ResponseObject(False, "Filename is required", status_code=400)
     
-    status = GlobalBackupManager.delete_global_backup(filename)
+    clean_filename = os.path.basename(filename)
+    if not clean_filename.startswith('GlobalBackup_') or not clean_filename.endswith('.zip'):
+        return ResponseObject(False, "Invalid backup filename", status_code=400)
+    
+    status = GlobalBackupManager.delete_global_backup(clean_filename)
     if not status:
         return ResponseObject(False, "Backup file not found or deletion failed", status_code=404)
     
@@ -1083,6 +1095,9 @@ def API_downloadGlobalBackup():
         return ResponseObject(False, "Filename is required", status_code=400)
     
     clean_filename = os.path.basename(filename)
+    if not clean_filename.startswith('GlobalBackup_') or not clean_filename.endswith('.zip'):
+        return ResponseObject(False, "Invalid backup filename", status_code=400)
+    
     fpath = os.path.join(GlobalBackupManager.get_backup_dir(), clean_filename)
     if not os.path.exists(fpath):
         return ResponseObject(False, "Backup file not found", status_code=404)
@@ -1202,9 +1217,15 @@ def API_restoreGlobalBackup():
                 _cleanup_expired_jobs()
                 try:
                     if os.name != 'nt':
-                        os.kill(os.getpid(), signal.SIGTERM)
+                        res = subprocess.run(["systemctl", "restart", "wg-dashboard"], capture_output=True, timeout=5)
+                        if res.returncode != 0:
+                            os.kill(os.getpid(), signal.SIGTERM)
                 except Exception:
-                    pass
+                    try:
+                        if os.name != 'nt':
+                            os.kill(os.getpid(), signal.SIGTERM)
+                    except Exception:
+                        pass
 
         threading.Thread(
             target=_run_restore,

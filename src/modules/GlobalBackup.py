@@ -116,13 +116,14 @@ def calculate_sha256(file_path: str) -> str:
 
 def split_sql_statements(sql_text: str) -> list[str]:
     """
-    Splits SQL statements respecting single quotes, double quotes, escape characters,
+    Splits SQL statements respecting single quotes, double quotes, dollar quotes, escape characters,
     and single-line comments so semicolons inside string literals (e.g. PostUp) don't break.
     """
     statements = []
     current = []
     in_single_quote = False
     in_double_quote = False
+    in_dollar_quote = False
     escape = False
 
     i = 0
@@ -131,7 +132,7 @@ def split_sql_statements(sql_text: str) -> list[str]:
         char = sql_text[i]
         
         # Check single-line comment (-- ...)
-        if not in_single_quote and not in_double_quote and char == '-' and i + 1 < n and sql_text[i+1] == '-':
+        if not in_single_quote and not in_double_quote and not in_dollar_quote and char == '-' and i + 1 < n and sql_text[i+1] == '-':
             while i < n and sql_text[i] != '\n':
                 i += 1
             continue
@@ -148,19 +149,26 @@ def split_sql_statements(sql_text: str) -> list[str]:
             i += 1
             continue
 
-        if char == "'" and not in_double_quote:
-            in_single_quote = not in_single_quote
-            current.append(char)
-            i += 1
+        if char == '$' and not in_single_quote and not in_double_quote and i + 1 < n and sql_text[i+1] == '$':
+            in_dollar_quote = not in_dollar_quote
+            current.append("$$")
+            i += 2
             continue
 
-        if char == '"' and not in_single_quote:
-            in_double_quote = not in_double_quote
-            current.append(char)
-            i += 1
-            continue
+        if not in_dollar_quote:
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current.append(char)
+                i += 1
+                continue
 
-        if char == ';' and not in_single_quote and not in_double_quote:
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current.append(char)
+                i += 1
+                continue
+
+        if char == ';' and not in_single_quote and not in_double_quote and not in_dollar_quote:
             stmt = "".join(current).strip()
             if stmt:
                 statements.append(stmt)
@@ -292,6 +300,14 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
                             os.remove(tmp_db)
                         except Exception:
                             pass
+
+                # Clear self-healing cache for this db
+                try:
+                    from .DatabaseConnection import _healed_on_boot
+                    _healed_on_boot.discard(db_path)
+                except Exception:
+                    pass
+
                 return True
             except Exception as e:
                 _logger.error(f"Error restoring SQLite database {db_name}: {e}")
@@ -388,6 +404,15 @@ class GlobalBackupManager:
             if os.path.exists(plugins_dir) and os.path.isdir(plugins_dir):
                 target_plugins = os.path.join(temp_dir, 'plugins')
                 shutil.copytree(plugins_dir, target_plugins, dirs_exist_ok=True)
+                for root, dirs, files in os.walk(target_plugins):
+                    for file in files:
+                        p_full = os.path.join(root, file)
+                        p_rel = os.path.relpath(p_full, temp_dir).replace('\\', '/')
+                        manifest_files.append({
+                            "path": p_rel,
+                            "sha256": calculate_sha256(p_full),
+                            "size": os.path.getsize(p_full)
+                        })
 
             # 2. WireGuard interface configs (.conf)
             _report_backup_progress(job_id, 30, "backing_up_interfaces")
@@ -436,6 +461,15 @@ class GlobalBackupManager:
                                     if os.path.exists(b_dir) and os.path.isdir(b_dir):
                                         dst_b_dir = os.path.join(temp_dir, 'per_config_backups', conf_type, fname[:-5])
                                         shutil.copytree(b_dir, dst_b_dir, dirs_exist_ok=True)
+                                        for root, dirs, files in os.walk(dst_b_dir):
+                                            for file in files:
+                                                b_full = os.path.join(root, file)
+                                                b_rel = os.path.relpath(b_full, temp_dir).replace('\\', '/')
+                                                manifest_files.append({
+                                                    "path": b_rel,
+                                                    "sha256": calculate_sha256(b_full),
+                                                    "size": os.path.getsize(b_full)
+                                                })
 
             # 3. Database dumps
             _report_backup_progress(job_id, 50, "dumping_databases")
@@ -488,7 +522,7 @@ class GlobalBackupManager:
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
                         full_p = os.path.join(root, file)
-                        rel_p = os.path.relpath(full_p, temp_dir)
+                        rel_p = os.path.relpath(full_p, temp_dir).replace('\\', '/')
                         zipf.write(full_p, rel_p)
 
             # GB-12: Secure backup archive permissions (0o600)
@@ -576,11 +610,11 @@ class GlobalBackupManager:
             return False, "Backup file does not exist"
         try:
             with zipfile.ZipFile(zip_filepath, 'r') as zipf:
-                namelist = zipf.namelist()
+                raw_namelist = zipf.namelist()
 
                 # GB-13: Defend against zip bombs
-                if len(namelist) > 5000:
-                    return False, f"Archive contains too many files ({len(namelist)} > 5000)"
+                if len(raw_namelist) > 5000:
+                    return False, f"Archive contains too many files ({len(raw_namelist)} > 5000)"
 
                 total_uncompressed = 0
                 for info in zipf.infolist():
@@ -588,11 +622,13 @@ class GlobalBackupManager:
                     if total_uncompressed > 1024 * 1024 * 1024:  # 1 GB
                         return False, "Archive uncompressed size exceeds limit (1 GB)"
 
+                namelist = [n.replace('\\', '/') for n in raw_namelist]
+
                 if 'MANIFEST.json' not in namelist:
                     return False, "Invalid backup: MANIFEST.json missing"
 
                 try:
-                    manifest_raw = zipf.read('MANIFEST.json').decode('utf-8')
+                    manifest_raw = zipf.read(raw_namelist[namelist.index('MANIFEST.json')]).decode('utf-8')
                     manifest = json.loads(manifest_raw)
                 except Exception as e:
                     return False, f"Corrupted MANIFEST.json: {e}"
@@ -610,14 +646,16 @@ class GlobalBackupManager:
                     if not path or not expected_sha256:
                         return False, "Manifest file entry missing path or sha256"
 
-                    if path not in namelist:
-                        return False, f"Missing file from manifest: {path}"
+                    norm_path = path.replace('\\', '/')
+                    if norm_path not in namelist:
+                        return False, f"Missing file from manifest: {norm_path}"
 
-                    allowed_paths.add(path)
-                    data = zipf.read(path)
+                    allowed_paths.add(norm_path)
+                    raw_entry_name = raw_namelist[namelist.index(norm_path)]
+                    data = zipf.read(raw_entry_name)
                     actual_sha256 = hashlib.sha256(data).hexdigest()
                     if actual_sha256.lower() != expected_sha256.lower():
-                        return False, f"Checksum mismatch for file: {path}"
+                        return False, f"Checksum mismatch for file: {norm_path}"
 
                 # GB-03 & GB-04: Reject any rogue/unexpected files not listed in manifest
                 # Note: Allow directory entries ending with '/'
@@ -686,6 +724,13 @@ class GlobalBackupManager:
                 except Exception:
                     pass
 
+            # Record existing host configurations before restoring (GB-06)
+            existing_host_confs = set()
+            if os.path.exists(target_wg):
+                existing_host_confs.update([f[:-5] for f in os.listdir(target_wg) if f.endswith('.conf')])
+            if os.path.exists(target_amnezia):
+                existing_host_confs.update([f[:-5] for f in os.listdir(target_amnezia) if f.endswith('.conf')])
+
             # 1. Restore ini & config files
             report(20, "restoring_configs")
             ini_src = os.path.join(temp_extract, 'wg-dashboard.ini')
@@ -719,27 +764,34 @@ class GlobalBackupManager:
             report(40, "restoring_wireguard")
             configs_src = os.path.join(temp_extract, 'configs')
             conf_regex = re.compile(r'^[a-zA-Z0-9_=+.-]+\.conf$')
+            restored_confs = {}
             if os.path.exists(configs_src) and os.path.isdir(configs_src):
                 os.makedirs(target_wg, exist_ok=True)
                 
                 # Backwards compatibility: root .conf files are wireguard
                 for fname in os.listdir(configs_src):
                     if fname.endswith('.conf') and conf_regex.match(fname):
-                        shutil.copy(os.path.join(configs_src, fname), os.path.join(target_wg, fname))
+                        dest_f = os.path.join(target_wg, fname)
+                        shutil.copy(os.path.join(configs_src, fname), dest_f)
+                        restored_confs[fname[:-5]] = ('wg', dest_f)
                 
                 # New structure: separated by type
                 wg_src = os.path.join(configs_src, 'wireguard')
                 if os.path.exists(wg_src) and os.path.isdir(wg_src):
                     for fname in os.listdir(wg_src):
                         if fname.endswith('.conf') and conf_regex.match(fname):
-                            shutil.copy(os.path.join(wg_src, fname), os.path.join(target_wg, fname))
+                            dest_f = os.path.join(target_wg, fname)
+                            shutil.copy(os.path.join(wg_src, fname), dest_f)
+                            restored_confs[fname[:-5]] = ('wg', dest_f)
                             
                 amnezia_src = os.path.join(configs_src, 'amnezia')
                 if os.path.exists(amnezia_src) and os.path.isdir(amnezia_src):
                     os.makedirs(target_amnezia, exist_ok=True)
                     for fname in os.listdir(amnezia_src):
                         if fname.endswith('.conf') and conf_regex.match(fname):
-                            shutil.copy(os.path.join(amnezia_src, fname), os.path.join(target_amnezia, fname))
+                            dest_f = os.path.join(target_amnezia, fname)
+                            shutil.copy(os.path.join(amnezia_src, fname), dest_f)
+                            restored_confs[fname[:-5]] = ('awg', dest_f)
 
             # GB-14: Restore per_config_backups if present in the archive
             per_cfg_src = os.path.join(temp_extract, 'per_config_backups')
@@ -778,26 +830,30 @@ class GlobalBackupManager:
 
             # 4. Synchronize running kernel interfaces with restored configs
             report(90, "syncing_runtime")
-            restored_confs = {}
-            if os.path.exists(target_wg):
-                for f in os.listdir(target_wg):
-                    if f.endswith('.conf'):
-                        iface = f[:-5]
-                        restored_confs[iface] = ('wg', os.path.join(target_wg, f))
-            if os.path.exists(target_amnezia):
-                for f in os.listdir(target_amnezia):
-                    if f.endswith('.conf'):
-                        iface = f[:-5]
-                        restored_confs[iface] = ('awg', os.path.join(target_amnezia, f))
 
             sync_notes = []
+            hook_warnings = []
             for iface, (proto, cpath) in restored_confs.items():
                 try:
                     s_ok, s_msg = sync_interface_runtime(iface, proto, cpath)
                     if not s_ok:
                         sync_notes.append(f"{iface}: {s_msg}")
+                    # Check for script hooks in restored confs (GB-04)
+                    with open(cpath, 'r', encoding='utf-8', errors='ignore') as f:
+                        c_text = f.read()
+                    for hook in ['PreUp', 'PostUp', 'PreDown', 'PostDown']:
+                        found = re.findall(rf'^\s*{hook}\s*=\s*(.+)$', c_text, re.MULTILINE | re.IGNORECASE)
+                        if found:
+                            hook_warnings.append(f"{iface} [{hook}]: {found[0].strip()[:40]}")
                 except Exception as e:
                     sync_notes.append(f"{iface}: {e}")
+
+            # Report unmanaged local configs (GB-06)
+            extra_local = sorted(list(existing_host_confs - set(restored_confs.keys())))
+            if extra_local:
+                sync_notes.append(f"Unmanaged local interfaces preserved (not in backup): {', '.join(extra_local)}")
+            if hook_warnings:
+                sync_notes.append(f"Script hooks present in restored configs: {'; '.join(hook_warnings[:5])}")
 
             report(95, "finalizing")
             shutil.rmtree(temp_extract, ignore_errors=True)
@@ -811,3 +867,4 @@ class GlobalBackupManager:
             if os.path.exists(temp_extract):
                 shutil.rmtree(temp_extract, ignore_errors=True)
             return False, f"Restore failed: {str(e)}"
+

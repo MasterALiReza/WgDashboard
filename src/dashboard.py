@@ -90,8 +90,10 @@ def peerInformationBackgroundThread():
     app.logger.info("Background Thread #1 PID:" + str(threading.get_native_id()))
     delay = 6
     reconcile_patrol_counter = 0
-    time.sleep(10)
     while True:
+        if app.config.get('MAINTENANCE_MODE', False):
+            time.sleep(2)
+            continue
         with app.app_context():
             try:
                 reconcile_patrol_counter += 1
@@ -141,6 +143,9 @@ def peerJobScheduleBackgroundThread():
         app.logger.info(f"Background Thread #2 PID:" + str(threading.get_native_id()))
         time.sleep(10)
         while True:
+            if app.config.get('MAINTENANCE_MODE', False):
+                time.sleep(2)
+                continue
             try:
                 AllPeerJobs.runJob()
             except Exception as e:
@@ -243,6 +248,9 @@ def globalBackupBackgroundThread():
                 break # Since backups are sorted newest first, this is the latest Auto backup
 
         while True:
+            if app.config.get('MAINTENANCE_MODE', False):
+                time.sleep(2)
+                continue
             try:
                 now = datetime.now()
 
@@ -292,6 +300,8 @@ def globalBackupBackgroundThread():
                                         last_backup_time = now
                                         app.logger.info(f"Scheduled global backup completed successfully: {result.get('filename') if isinstance(result, dict) else result}")
                                     else:
+                                        # GB-10: On failure, set backoff to prevent 60s busy loop
+                                        last_backup_time = now - timedelta(hours=1)
                                         app.logger.error(f"Scheduled global backup failed: {result}")
                                 finally:
                                     with _is_backup_running_lock:
@@ -339,18 +349,18 @@ def InitWireguardConfigurationsList(startup: bool = False):
                 confs = os.listdir(awg_path)
                 confs.sort()
                 for i in confs:
-                if RegexMatch("^(.{1,}).(conf)$", i):
-                    i = i.replace('.conf', '')
-                    try:
-                        if i in WireguardConfigurations.keys():
-                            if WireguardConfigurations[i].configurationFileChanged():
+                    if RegexMatch("^(.{1,}).(conf)$", i):
+                        i = i.replace('.conf', '')
+                        try:
+                            if i in WireguardConfigurations.keys():
+                                if WireguardConfigurations[i].configurationFileChanged():
+                                    with app.app_context():
+                                        WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
+                            else:
                                 with app.app_context():
-                                    WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
-                        else:
-                            with app.app_context():
-                                WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
-                    except WireguardConfiguration.InvalidConfigurationFileException as e:
-                        app.logger.error(f"{i} have an invalid configuration file.")
+                                    WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
+                        except WireguardConfiguration.InvalidConfigurationFileException as e:
+                            app.logger.error(f"{i} have an invalid configuration file.")
 
         if startup:
             for conf_name, conf_obj in list(WireguardConfigurations.items()):
@@ -463,7 +473,12 @@ def auth_req():
     if request.method.lower() == 'options':
         return ResponseObject(True)        
 
-    _maintenance_whitelist = ('/api/globalBackup/restore', '/api/globalBackup/restore/progress')
+    _maintenance_whitelist = (
+        '/api/globalBackup/restore',
+        '/api/globalBackup/restore/progress',
+        '/api/globalBackup/restore/progress/poll',
+        '/api/globalBackup/create/progress/poll'
+    )
     if app.config.get('MAINTENANCE_MODE', False) and not any(request.path.endswith(p) for p in _maintenance_whitelist):
         if request.path.startswith('/api/'):
             return ResponseObject(False, "System is currently under maintenance due to restore process", status_code=503)
@@ -1077,16 +1092,32 @@ def API_downloadGlobalBackup():
 @app.post(f'{APP_PREFIX}/api/globalBackup/restore')
 def API_restoreGlobalBackup():
     """Start restore in a background thread and immediately return a job_id."""
+    import modules.GlobalBackup
+
+    # GB-04: Require authenticated admin session; reject API key access
+    if g.get('api_accessed', False) or session.get("role") != "admin":
+        return ResponseObject(False, "Restore requires an authenticated admin session and cannot be performed via API key.", status_code=403)
+
+    # GB-13: Reject oversized payload (max 500 MB)
+    if request.content_length and request.content_length > 500 * 1024 * 1024:
+        return ResponseObject(False, "Backup file exceeds maximum allowed size (500 MB)", status_code=413)
+
     if app.config.get('MAINTENANCE_MODE', False):
         return ResponseObject(False, "System is already undergoing maintenance or restoring.", status_code=409)
-    
+
+    # GB-10: Check and acquire backup concurrency lock atomically
+    with _is_backup_running_lock:
+        if modules.GlobalBackup._is_backup_running:
+            return ResponseObject(False, "A backup or restore job is currently running.", status_code=409)
+        modules.GlobalBackup._is_backup_running = True
+
     app.config['MAINTENANCE_MODE'] = True
     _cleanup_expired_jobs()
 
-    try:
-        target_path = None
-        is_uploaded = False
+    target_path = None
+    is_uploaded = False
 
+    try:
         if 'backupFile' in request.files:
             file = request.files['backupFile']
             if file and file.filename.endswith('.zip'):
@@ -1094,6 +1125,8 @@ def API_restoreGlobalBackup():
                 header = file.read(4)
                 file.seek(0)
                 if header != b'PK\x03\x04':
+                    with _is_backup_running_lock:
+                        modules.GlobalBackup._is_backup_running = False
                     app.config['MAINTENANCE_MODE'] = False
                     return ResponseObject(False, "Invalid backup file format", status_code=400)
 
@@ -1110,6 +1143,13 @@ def API_restoreGlobalBackup():
                 target_path = os.path.join(GlobalBackupManager.get_backup_dir(), clean_name)
 
         if not target_path or not os.path.exists(target_path):
+            if is_uploaded and target_path and os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+            with _is_backup_running_lock:
+                modules.GlobalBackup._is_backup_running = False
             app.config['MAINTENANCE_MODE'] = False
             return ResponseObject(False, "Valid backup file or filename must be provided", status_code=400)
 
@@ -1136,6 +1176,8 @@ def API_restoreGlobalBackup():
                         os.remove(tp)
                     except Exception:
                         pass
+                with _is_backup_running_lock:
+                    modules.GlobalBackup._is_backup_running = False
 
             with _restore_jobs_lock:
                 if jid in _restore_jobs:
@@ -1150,13 +1192,19 @@ def API_restoreGlobalBackup():
                             "finished_at": datetime.utcnow()
                         })
 
-            app.config['MAINTENANCE_MODE'] = False
-
-            if status:
-                # Delay restart so SSE client gets the final 100% update
+            if not status:
+                # Restore failed: reset maintenance mode
+                app.config['MAINTENANCE_MODE'] = False
+            else:
+                # GB-05: Successful restore - keep MAINTENANCE_MODE = True until process exit!
+                # Delay slightly so client receives the final 100% update
                 time.sleep(3)
                 _cleanup_expired_jobs()
-                os.kill(os.getpid(), signal.SIGTERM)
+                try:
+                    if os.name != 'nt':
+                        os.kill(os.getpid(), signal.SIGTERM)
+                except Exception:
+                    pass
 
         threading.Thread(
             target=_run_restore,
@@ -1168,6 +1216,13 @@ def API_restoreGlobalBackup():
         return ResponseObject(True, "Restore started", data={"job_id": job_id})
 
     except Exception as e:
+        if is_uploaded and target_path and os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except Exception:
+                pass
+        with _is_backup_running_lock:
+            modules.GlobalBackup._is_backup_running = False
         app.config['MAINTENANCE_MODE'] = False
         return ResponseObject(False, f"Restore start error: {str(e)}", status_code=500)
 
@@ -1181,7 +1236,8 @@ def API_restoreGlobalBackupProgress():
 
     def _event_stream():
         sent_done = False
-        for _ in range(600):  # max 5 min (600 * 0.5s)
+        # GB-11: 15 minutes timeout (1800 * 0.5s) with periodic keepalive comments
+        for i in range(1800):
             with _restore_jobs_lock:
                 job = dict(_restore_jobs.get(job_id, {}))
 
@@ -1201,6 +1257,9 @@ def API_restoreGlobalBackupProgress():
                 sent_done = True
                 break
 
+            if i % 30 == 0:
+                yield ": keepalive\n\n"
+
             time.sleep(0.5)
 
         if not sent_done:
@@ -1215,6 +1274,29 @@ def API_restoreGlobalBackupProgress():
             'Connection': 'keep-alive'
         }
     )
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/create/progress/poll/<job_id>')
+def API_createGlobalBackup_progress_poll(job_id):
+    """JSON polling endpoint for global backup creation progress (GB-11)."""
+    _cleanup_expired_jobs()
+    with _backup_jobs_lock:
+        info = _backup_jobs.get(job_id)
+    if not info:
+        return ResponseObject(False, "Job not found", status_code=404)
+    return ResponseObject(True, data=dict(info))
+
+@app.get(f'{APP_PREFIX}/api/globalBackup/restore/progress/poll')
+def API_restoreGlobalBackupProgress_poll():
+    """JSON polling endpoint for global backup restore progress (GB-11)."""
+    job_id = request.args.get('job_id', '')
+    if not job_id:
+        return ResponseObject(False, "job_id is required", status_code=400)
+    _cleanup_expired_jobs()
+    with _restore_jobs_lock:
+        job = dict(_restore_jobs.get(job_id, {}))
+    if not job:
+        return ResponseObject(False, "Job not found", status_code=404)
+    return ResponseObject(True, data=job)
 
 @app.get(f'{APP_PREFIX}/api/getDashboardConfiguration')
 def API_getDashboardConfiguration():

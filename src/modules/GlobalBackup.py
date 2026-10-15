@@ -6,6 +6,7 @@ import hashlib
 import shutil
 import uuid
 import threading
+import logging
 from datetime import datetime, timedelta
 import subprocess
 import tempfile
@@ -13,6 +14,8 @@ import sqlalchemy as db
 from sqlalchemy.schema import CreateTable
 from .DatabaseConnection import ConnectionString
 from .DashboardConfig import DashboardConfig
+
+_logger = logging.getLogger("WGDashboard.GlobalBackup")
 
 def sync_interface_runtime(interface: str, protocol: str, conf_path: str) -> tuple[bool, str]:
     """
@@ -39,7 +42,7 @@ def sync_interface_runtime(interface: str, protocol: str, conf_path: str) -> tup
 
         sync_cmd = [protocol, "syncconf", interface, tmp_stripped]
         subprocess.check_output(sync_cmd, stderr=subprocess.STDOUT, timeout=15)
-        return True, f"Interface {interface} kernel synchronized successfully."
+        return True, f"Interface {interface} kernel synchronized successfully. Note: Interface-level changes (Address/MTU/PostUp) require restart."
     except Exception as e:
         return False, f"Failed to sync interface {interface} runtime: {e}"
     finally:
@@ -111,6 +114,68 @@ def calculate_sha256(file_path: str) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
+def split_sql_statements(sql_text: str) -> list[str]:
+    """
+    Splits SQL statements respecting single quotes, double quotes, escape characters,
+    and single-line comments so semicolons inside string literals (e.g. PostUp) don't break.
+    """
+    statements = []
+    current = []
+    in_single_quote = False
+    in_double_quote = False
+    escape = False
+
+    i = 0
+    n = len(sql_text)
+    while i < n:
+        char = sql_text[i]
+        
+        # Check single-line comment (-- ...)
+        if not in_single_quote and not in_double_quote and char == '-' and i + 1 < n and sql_text[i+1] == '-':
+            while i < n and sql_text[i] != '\n':
+                i += 1
+            continue
+
+        if escape:
+            current.append(char)
+            escape = False
+            i += 1
+            continue
+
+        if char == '\\':
+            current.append(char)
+            escape = True
+            i += 1
+            continue
+
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(char)
+            i += 1
+            continue
+
+        if char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(char)
+            i += 1
+            continue
+
+        if char == ';' and not in_single_quote and not in_double_quote:
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+
+        current.append(char)
+        i += 1
+
+    last_stmt = "".join(current).strip()
+    if last_stmt:
+        statements.append(last_stmt)
+    return statements
+
 def dump_database_to_sql(db_name: str, dump_path: str = None) -> str:
     try:
         cn = ConnectionString(db_name)
@@ -119,6 +184,11 @@ def dump_database_to_sql(db_name: str, dump_path: str = None) -> str:
             import sqlite3
             db_path = cn.split('sqlite:///')[1].split('?')[0]
             with sqlite3.connect(db_path, timeout=30.0) as con:
+                # Flush WAL to main database before dumping (GB-07)
+                try:
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                except Exception:
+                    pass
                 if dump_path:
                     with open(dump_path, 'w', encoding='utf-8') as f:
                         for line in con.iterdump():
@@ -175,19 +245,64 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
         return True
     try:
         cn_str = ConnectionString(db_name)
-        # Native execution for SQLite to handle semicolons inside string data and transactions correctly
+        # Native execution for SQLite with isolated tmp file and integrity check (GB-01, GB-02)
         if cn_str.startswith('sqlite:///'):
             import sqlite3
             db_path = cn_str.split('sqlite:///')[1].split('?')[0]
-            if os.path.exists(db_path):
-                try:
-                    os.remove(db_path)
-                except Exception:
-                    pass
-            with sqlite3.connect(db_path, timeout=30.0) as con:
-                con.executescript(sql_content)
-            return True
+            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
+            tmp_db = os.path.abspath(db_path + f".restore_{uuid.uuid4().hex}.tmp")
+            try:
+                with sqlite3.connect(tmp_db, timeout=30.0) as con:
+                    con.executescript(sql_content)
+                    cursor = con.cursor()
+                    cursor.execute("PRAGMA integrity_check;")
+                    rows = cursor.fetchall()
+                    if not rows or rows[0][0] != "ok":
+                        _logger.error(f"Integrity check failed for restored SQLite database {db_name}: {rows}")
+                        if os.path.exists(tmp_db):
+                            os.remove(tmp_db)
+                        return False
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+                for ext in ["-wal", "-shm"]:
+                    p = tmp_db + ext
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+
+                for ext in ["-wal", "-shm"]:
+                    p = db_path + ext
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+
+                try:
+                    os.replace(tmp_db, db_path)
+                except (PermissionError, OSError) as e:
+                    _logger.warning(f"os.replace failed ({e}), falling back to file copy for {db_path}")
+                    with open(tmp_db, 'rb') as f_src, open(db_path, 'wb') as f_dst:
+                        shutil.copyfileobj(f_src, f_dst)
+                    if os.path.exists(tmp_db):
+                        try:
+                            os.remove(tmp_db)
+                        except Exception:
+                            pass
+                return True
+            except Exception as e:
+                _logger.error(f"Error restoring SQLite database {db_name}: {e}")
+                if os.path.exists(tmp_db):
+                    try:
+                        os.remove(tmp_db)
+                    except Exception:
+                        pass
+                return False
+
+        # Fallback for PostgreSQL / MySQL (GB-08)
         engine = db.create_engine(cn_str)
         metadata = db.MetaData()
         try:
@@ -195,27 +310,30 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
             with engine.begin() as conn:
                 for table in reversed(metadata.sorted_tables):
                     conn.execute(db.text(f'DROP TABLE IF EXISTS "{table.name}"'))
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.warning(f"Warning dropping tables for {db_name}: {e}")
 
-        statements = [s.strip() for s in sql_content.split(";") if s.strip()]
+        statements = split_sql_statements(sql_content)
         with engine.begin() as conn:
             for stmt in statements:
                 if stmt and not stmt.startswith("--"):
-                    try:
-                        conn.execute(db.text(stmt))
-                    except Exception:
-                        pass
+                    conn.execute(db.text(stmt))
         engine.dispose()
         return True
     except Exception as e:
+        _logger.error(f"Failed to restore database {db_name}: {e}")
         return False
 
 class GlobalBackupManager:
     @staticmethod
     def get_backup_dir() -> str:
-        os.makedirs(GLOBAL_BACKUP_DIR, exist_ok=True)
-        return GLOBAL_BACKUP_DIR
+        backup_dir = os.getenv('GLOBAL_BACKUP_PATH', os.path.join(os.getenv('CONFIGURATION_PATH', '.'), 'GlobalBackups'))
+        os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(backup_dir, 0o700)
+        except Exception:
+            pass
+        return backup_dir
 
     @staticmethod
     def create_global_backup(label: str = "", include_logs: bool = True, include_existing_backups: bool = False, job_id: str | None = None) -> tuple[bool, str | dict]:
@@ -373,10 +491,16 @@ class GlobalBackupManager:
                         rel_p = os.path.relpath(full_p, temp_dir)
                         zipf.write(full_p, rel_p)
 
+            # GB-12: Secure backup archive permissions (0o600)
+            try:
+                os.chmod(zip_filepath, 0o600)
+            except Exception:
+                pass
+
             # Clean up temp
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-            # Enforce retention policy
+            # Enforce retention policy for automated backups
             GlobalBackupManager.enforce_retention_policy(10)
 
             _report_backup_progress(job_id, 100, "done")
@@ -435,8 +559,11 @@ class GlobalBackupManager:
     def enforce_retention_policy(max_backups: int = 10) -> bool:
         try:
             backups = GlobalBackupManager.list_global_backups()
-            if len(backups) > max_backups:
-                to_delete = backups[max_backups:]
+            # GB-09: Retention applies ONLY to automated backups (label starts with "Auto_").
+            # Manual backups and PreRestore safety backups must NEVER be deleted automatically.
+            auto_backups = [b for b in backups if b.get('label', '').startswith('Auto_')]
+            if len(auto_backups) > max_backups:
+                to_delete = auto_backups[max_backups:]
                 for b in to_delete:
                     GlobalBackupManager.delete_global_backup(b['filename'])
             return True
@@ -449,10 +576,58 @@ class GlobalBackupManager:
             return False, "Backup file does not exist"
         try:
             with zipfile.ZipFile(zip_filepath, 'r') as zipf:
-                if 'MANIFEST.json' not in zipf.namelist():
+                namelist = zipf.namelist()
+
+                # GB-13: Defend against zip bombs
+                if len(namelist) > 5000:
+                    return False, f"Archive contains too many files ({len(namelist)} > 5000)"
+
+                total_uncompressed = 0
+                for info in zipf.infolist():
+                    total_uncompressed += info.file_size
+                    if total_uncompressed > 1024 * 1024 * 1024:  # 1 GB
+                        return False, "Archive uncompressed size exceeds limit (1 GB)"
+
+                if 'MANIFEST.json' not in namelist:
                     return False, "Invalid backup: MANIFEST.json missing"
-                manifest = json.loads(zipf.read('MANIFEST.json').decode('utf-8'))
+
+                try:
+                    manifest_raw = zipf.read('MANIFEST.json').decode('utf-8')
+                    manifest = json.loads(manifest_raw)
+                except Exception as e:
+                    return False, f"Corrupted MANIFEST.json: {e}"
+
+                if not isinstance(manifest, dict) or "version" not in manifest:
+                    return False, "Invalid manifest schema: missing version"
+
+                manifest_files = manifest.get("files", [])
+                allowed_paths = {"MANIFEST.json"}
+
+                # GB-03: Verify sha256 checksum and presence of all declared files
+                for entry in manifest_files:
+                    path = entry.get("path")
+                    expected_sha256 = entry.get("sha256")
+                    if not path or not expected_sha256:
+                        return False, "Manifest file entry missing path or sha256"
+
+                    if path not in namelist:
+                        return False, f"Missing file from manifest: {path}"
+
+                    allowed_paths.add(path)
+                    data = zipf.read(path)
+                    actual_sha256 = hashlib.sha256(data).hexdigest()
+                    if actual_sha256.lower() != expected_sha256.lower():
+                        return False, f"Checksum mismatch for file: {path}"
+
+                # GB-03 & GB-04: Reject any rogue/unexpected files not listed in manifest
+                # Note: Allow directory entries ending with '/'
+                extra_files = [n for n in namelist if n not in allowed_paths and not n.endswith("/")]
+                if extra_files:
+                    return False, f"Unexpected/unmanifested files in archive: {extra_files[:5]}"
+
                 return True, manifest
+        except zipfile.BadZipFile:
+            return False, "Archive is corrupted or not a valid zip file"
         except Exception as e:
             return False, f"Failed to validate archive: {str(e)}"
 
@@ -465,6 +640,17 @@ class GlobalBackupManager:
         valid, manifest_or_err = GlobalBackupManager.validate_backup_manifest(zip_filepath)
         if not valid:
             return False, str(manifest_or_err)
+
+        # GB-02: Safety Backup! Create a PreRestore backup of current state before touching anything
+        report(8, "creating_safety_backup")
+        try:
+            safety_ok, safety_res = GlobalBackupManager.create_global_backup(label="PreRestore")
+            if not safety_ok:
+                _logger.warning(f"Failed to create PreRestore safety backup: {safety_res}")
+            else:
+                _logger.info(f"Created PreRestore safety backup: {safety_res}")
+        except Exception as e:
+            _logger.warning(f"Exception creating PreRestore safety backup: {e}")
 
         temp_extract = os.path.join(GlobalBackupManager.get_backup_dir(), f"restore_{uuid.uuid4().hex}")
         try:
@@ -479,22 +665,24 @@ class GlobalBackupManager:
                 zipf.extractall(temp_extract)
 
             config_path = os.getenv('CONFIGURATION_PATH', '.')
+            
+            # GB-04: Read wireguard and amnezia destination paths EXCLUSIVELY from current host server configuration!
+            # NEVER trust paths in restored ini to prevent hijacking root filesystem
             target_wg = "/etc/wireguard"
             target_amnezia = "/etc/amnezia/amneziawg"
-
-            restored_ini = os.path.join(temp_extract, 'wg-dashboard.ini')
-            if not os.path.exists(restored_ini):
-                restored_ini = os.path.join(config_path, 'wg-dashboard.ini')
-            if os.path.exists(restored_ini):
+            current_host_ini = os.path.join(config_path, 'wg-dashboard.ini')
+            current_server_section = {}
+            if os.path.exists(current_host_ini):
                 try:
                     import configparser
-                    config = configparser.ConfigParser()
-                    config.read(restored_ini)
-                    if 'Server' in config:
-                        if 'wg_conf_path' in config['Server']:
-                            target_wg = config['Server']['wg_conf_path']
-                        if 'awg_conf_path' in config['Server']:
-                            target_amnezia = config['Server']['awg_conf_path']
+                    h_cfg = configparser.ConfigParser()
+                    h_cfg.read(current_host_ini)
+                    if 'Server' in h_cfg:
+                        current_server_section = dict(h_cfg['Server'])
+                        if 'wg_conf_path' in current_server_section:
+                            target_wg = current_server_section['wg_conf_path']
+                        if 'awg_conf_path' in current_server_section:
+                            target_amnezia = current_server_section['awg_conf_path']
                 except Exception:
                     pass
 
@@ -502,45 +690,74 @@ class GlobalBackupManager:
             report(20, "restoring_configs")
             ini_src = os.path.join(temp_extract, 'wg-dashboard.ini')
             if os.path.exists(ini_src):
-                shutil.copy(ini_src, os.path.join(config_path, 'wg-dashboard.ini'))
+                # Preserve host's Server section
+                if current_server_section:
+                    try:
+                        import configparser
+                        restored_cfg = configparser.ConfigParser()
+                        restored_cfg.read(ini_src)
+                        if 'Server' not in restored_cfg:
+                            restored_cfg.add_section('Server')
+                        for k, v in current_server_section.items():
+                            restored_cfg.set('Server', k, str(v))
+                        with open(os.path.join(config_path, 'wg-dashboard.ini'), 'w', encoding='utf-8') as out_f:
+                            restored_cfg.write(out_f)
+                    except Exception as e:
+                        _logger.warning(f"Failed to preserve server section in ini: {e}")
+                        shutil.copy(ini_src, os.path.join(config_path, 'wg-dashboard.ini'))
+                else:
+                    shutil.copy(ini_src, os.path.join(config_path, 'wg-dashboard.ini'))
 
             oidc_src = os.path.join(temp_extract, 'wg-dashboard-oidc-providers.json')
             if os.path.exists(oidc_src):
                 shutil.copy(oidc_src, os.path.join(config_path, 'wg-dashboard-oidc-providers.json'))
 
-            for opt_file in ['certbot.ini', 'gunicorn.conf.py']:
-                p = os.path.join(temp_extract, opt_file)
-                if os.path.exists(p):
-                    shutil.copy(p, os.path.join(config_path, opt_file))
-
-            plugins_src = os.path.join(temp_extract, 'plugins')
-            if os.path.exists(plugins_src) and os.path.isdir(plugins_src):
-                shutil.copytree(plugins_src, os.path.join(config_path, 'plugins'), dirs_exist_ok=True)
+            # GB-04: DO NOT restore gunicorn.conf.py, certbot.ini, or plugins/
+            # This completely closes remote code execution vectors via uploaded backups.
 
             # 2. Restore WireGuard & AmneziaWG .conf files
             report(40, "restoring_wireguard")
             configs_src = os.path.join(temp_extract, 'configs')
+            conf_regex = re.compile(r'^[a-zA-Z0-9_=+.-]+\.conf$')
             if os.path.exists(configs_src) and os.path.isdir(configs_src):
                 os.makedirs(target_wg, exist_ok=True)
                 
                 # Backwards compatibility: root .conf files are wireguard
                 for fname in os.listdir(configs_src):
-                    if fname.endswith('.conf'):
+                    if fname.endswith('.conf') and conf_regex.match(fname):
                         shutil.copy(os.path.join(configs_src, fname), os.path.join(target_wg, fname))
                 
                 # New structure: separated by type
                 wg_src = os.path.join(configs_src, 'wireguard')
                 if os.path.exists(wg_src) and os.path.isdir(wg_src):
                     for fname in os.listdir(wg_src):
-                        if fname.endswith('.conf'):
+                        if fname.endswith('.conf') and conf_regex.match(fname):
                             shutil.copy(os.path.join(wg_src, fname), os.path.join(target_wg, fname))
                             
                 amnezia_src = os.path.join(configs_src, 'amnezia')
                 if os.path.exists(amnezia_src) and os.path.isdir(amnezia_src):
                     os.makedirs(target_amnezia, exist_ok=True)
                     for fname in os.listdir(amnezia_src):
-                        if fname.endswith('.conf'):
+                        if fname.endswith('.conf') and conf_regex.match(fname):
                             shutil.copy(os.path.join(amnezia_src, fname), os.path.join(target_amnezia, fname))
+
+            # GB-14: Restore per_config_backups if present in the archive
+            per_cfg_src = os.path.join(temp_extract, 'per_config_backups')
+            if os.path.exists(per_cfg_src) and os.path.isdir(per_cfg_src):
+                report(50, "restoring_per_config_backups")
+                for ctype in os.listdir(per_cfg_src):
+                    ctype_path = os.path.join(per_cfg_src, ctype)
+                    if os.path.isdir(ctype_path):
+                        target_base = target_wg if ctype == 'wireguard' else target_amnezia
+                        for iface_dir in os.listdir(ctype_path):
+                            src_b_dir = os.path.join(ctype_path, iface_dir)
+                            if os.path.isdir(src_b_dir):
+                                dst_b_dir = os.path.join(target_base, 'WGDashboard_Backup')
+                                os.makedirs(dst_b_dir, exist_ok=True)
+                                for b_file in os.listdir(src_b_dir):
+                                    src_file_path = os.path.join(src_b_dir, b_file)
+                                    if os.path.isfile(src_file_path):
+                                        shutil.copy(src_file_path, os.path.join(dst_b_dir, b_file))
 
             # 3. Restore databases from SQL dumps
             report(60, "restoring_databases")
@@ -552,8 +769,10 @@ class GlobalBackupManager:
                     db_name = dump_file.replace('_dump.sql', '')
                     with open(os.path.join(sql_src, dump_file), 'r', encoding='utf-8', errors='ignore') as f:
                         sql_content = f.read()
-                    restore_database_from_sql(db_name, sql_content)
-                    # Report granular progress between 60% and 85%
+                    # GB-02: Validate return status of database restore
+                    db_success = restore_database_from_sql(db_name, sql_content)
+                    if not db_success:
+                        return False, f"Failed to restore database: {db_name}"
                     pct = 60 + int(25 * (idx + 1) / total_dumps)
                     report(pct, "restoring_databases")
 
@@ -571,16 +790,22 @@ class GlobalBackupManager:
                         iface = f[:-5]
                         restored_confs[iface] = ('awg', os.path.join(target_amnezia, f))
 
+            sync_notes = []
             for iface, (proto, cpath) in restored_confs.items():
                 try:
-                    sync_interface_runtime(iface, proto, cpath)
-                except Exception:
-                    pass
+                    s_ok, s_msg = sync_interface_runtime(iface, proto, cpath)
+                    if not s_ok:
+                        sync_notes.append(f"{iface}: {s_msg}")
+                except Exception as e:
+                    sync_notes.append(f"{iface}: {e}")
 
             report(95, "finalizing")
             shutil.rmtree(temp_extract, ignore_errors=True)
             report(100, "done")
-            return True, "Global backup restored successfully."
+            msg = "Global backup restored successfully."
+            if sync_notes:
+                msg += " Notes: " + "; ".join(sync_notes)
+            return True, msg
 
         except Exception as e:
             if os.path.exists(temp_extract):

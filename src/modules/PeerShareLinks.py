@@ -1,4 +1,5 @@
-from .DatabaseConnection import ConnectionString
+import threading
+from .DatabaseConnection import ConnectionString, get_engine
 from .PeerShareLink import PeerShareLink
 import sqlalchemy as db
 from datetime import datetime
@@ -9,8 +10,12 @@ Peer Share Links
 """
 class PeerShareLinks:
     def __init__(self, DashboardConfig, WireguardConfigurations):
+        self.lock = threading.Lock()
         self.Links: list[PeerShareLink] = []
-        self.engine = db.create_engine(ConnectionString("wgdashboard"))
+        self._index: dict[tuple[str, str], list[PeerShareLink]] = {}
+        self._share_id_index: dict[str, PeerShareLink] = {}
+        # PERF-04: Shared engine pool
+        self.engine = get_engine("wgdashboard")
         self.metadata = db.MetaData()
         self.peerShareLinksTable = db.Table(
             'PeerShareLinks', self.metadata,
@@ -24,24 +29,49 @@ class PeerShareLinks:
         self.metadata.create_all(self.engine)
         self.__getSharedLinks()
         self.wireguardConfigurations = WireguardConfigurations
+
+    def __rebuild_index(self):
+        """PERF-01: Build dictionary index for O(1) link lookups."""
+        idx = {}
+        id_idx = {}
+        for link in self.Links:
+            idx.setdefault((link.Configuration, link.Peer), []).append(link)
+            id_idx[link.ShareID] = link
+        self._index = idx
+        self._share_id_index = id_idx
+
     def __getSharedLinks(self):
-        self.Links.clear()
-        with self.engine.connect() as conn:
-            allLinks = conn.execute(
-                self.peerShareLinksTable.select().where(
-                    db.or_(self.peerShareLinksTable.columns.ExpireDate.is_(None), self.peerShareLinksTable.columns.ExpireDate > datetime.now())
-                )
-            ).mappings().fetchall()
-            for link in allLinks:
-                self.Links.append(PeerShareLink(**link))
-
-
+        with self.lock:
+            self.Links.clear()
+            with self.engine.connect() as conn:
+                allLinks = conn.execute(
+                    self.peerShareLinksTable.select().where(
+                        db.or_(self.peerShareLinksTable.columns.ExpireDate.is_(None), self.peerShareLinksTable.columns.ExpireDate > datetime.now())
+                    )
+                ).mappings().fetchall()
+                for link in allLinks:
+                    self.Links.append(PeerShareLink(**link))
+            self.__rebuild_index()
 
     def getLink(self, Configuration: str, Peer: str) -> list[PeerShareLink]:
-        return list(filter(lambda x : x.Configuration == Configuration and x.Peer == Peer and (x.ExpireDate is None or x.ExpireDate > datetime.now()), self.Links))
+        """PERF-01: O(1) dictionary lookup instead of linear filtering."""
+        with self.lock:
+            now = datetime.now()
+            if hasattr(self, '_index'):
+                links = self._index.get((Configuration, Peer), [])
+                return [x for x in links if x.ExpireDate is None or x.ExpireDate > now]
+            return list(filter(lambda x : x.Configuration == Configuration and x.Peer == Peer and (x.ExpireDate is None or x.ExpireDate > now), self.Links))
 
     def getLinkByID(self, ShareID: str) -> list[PeerShareLink]:
-        return list(filter(lambda x : x.ShareID == ShareID and (x.ExpireDate is None or x.ExpireDate > datetime.now()), self.Links))
+        """PERF-01: O(1) dictionary lookup by ShareID."""
+        with self.lock:
+            now = datetime.now()
+            if hasattr(self, '_share_id_index'):
+                link = self._share_id_index.get(ShareID)
+                if link and (link.ExpireDate is None or link.ExpireDate > now):
+                    return [link]
+                return []
+            return list(filter(lambda x : x.ShareID == ShareID and (x.ExpireDate is None or x.ExpireDate > now), self.Links))
 
     def addLink(self, Configuration: str, Peer: str, ExpireDate: datetime = None) -> tuple[bool, str]:
         try:

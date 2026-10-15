@@ -44,7 +44,7 @@ class _PeerFallback:
                 for k, v in data.items():
                     setattr(self, str(k), v)
 
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine, dispose_all
 from .DashboardConfig import DashboardConfig
 from .Peer import Peer
 from .PeerJobs import PeerJobs
@@ -83,6 +83,7 @@ class WireguardConfiguration:
                  wg: bool = True
                  ):
         self.Peers = []
+        self.RestrictedPeers = []
         self.peer_class = Peer
         self.__parser: configparser.ConfigParser = configparser.RawConfigParser(strict=False)
         self.__parser.optionxform = str
@@ -108,7 +109,8 @@ class WireguardConfiguration:
         self.AllPeerShareLinks = AllPeerShareLinks
         self.DashboardWebHooks = DashboardWebHooks
         self.configPath = os.path.join(self.__getProtocolPath(), f'{self.Name}.conf')
-        self.engine: sqlalchemy.Engine = sqlalchemy.create_engine(ConnectionString("wgdashboard"))
+        # PERF-04: Shared engine pool
+        self.engine: sqlalchemy.Engine = get_engine("wgdashboard")
         self.metadata: sqlalchemy.MetaData = sqlalchemy.MetaData()
         self.dbType = self.DashboardConfig.GetConfig("Database", "type")[1]
         self._last_stats_refresh_time = 0  # Debounce cache timestamp
@@ -350,7 +352,9 @@ class WireguardConfiguration:
             f'{dbName}_history_endpoint', self.metadata,
             sqlalchemy.Column('id', sqlalchemy.String(255), nullable=False),
             sqlalchemy.Column('endpoint', sqlalchemy.String(255), nullable=False),
-            sqlalchemy.Column('time', time_col_type)
+            sqlalchemy.Column('time', time_col_type),
+            sqlalchemy.UniqueConstraint('id', 'endpoint', name=f'uq_{dbName}_peer_endpoint'),
+            extend_existing=True
         )
         
         self.infoTable = sqlalchemy.Table(
@@ -432,8 +436,22 @@ class WireguardConfiguration:
         return GenerateWireguardPublicKey(self.PrivateKey)[1]
 
     def getStatus(self) -> bool:
-        net_ifaces = psutil.net_if_addrs().keys()
-        self.Status = (self.Name in net_ifaces) or os.path.exists(f"/sys/class/net/{self.Name}")
+        # PERF-02: Fast path on Linux using sysfs; cache result for 2 seconds to avoid slamming psutil
+        now = time.time()
+        if hasattr(self, '_last_status_check') and (now - self._last_status_check < 2.0):
+            return self.Status
+        self._last_status_check = now
+        if os.path.exists(f"/sys/class/net/{self.Name}"):
+            self.Status = True
+            return True
+        if os.path.exists("/sys/class/net"):
+            self.Status = False
+            return False
+        try:
+            net_ifaces = psutil.net_if_addrs().keys()
+            self.Status = (self.Name in net_ifaces)
+        except Exception:
+            self.Status = False
         return self.Status
 
     def getAutostartStatus(self):
@@ -460,10 +478,16 @@ class WireguardConfiguration:
 
         cls = getattr(self, 'peer_class', Peer)
         new_restricted = []
+        restricted_cache = {p.id: p for p in (getattr(self, 'RestrictedPeers', None) or []) if isinstance(p, cls)}
         with self.engine.connect() as conn:
             restricted = conn.execute(self.peersRestrictedTable.select()).mappings().fetchall()
             for i in restricted:
-                p = cls(i, self)
+                pid = i.get('id')
+                if pid in restricted_cache:
+                    p = restricted_cache[pid]
+                    p.update_attributes(i)
+                else:
+                    p = cls(i, self)
                 p.restricted = True
                 new_restricted.append(p)
         self.RestrictedPeers = new_restricted
@@ -474,6 +498,23 @@ class WireguardConfiguration:
         changed = self.__configFileModifiedTime is None or self.__configFileModifiedTime != mt
         self.__configFileModifiedTime = mt
         return changed
+
+    def reloadConfiguration(self):
+        """
+        PERF-03: Reloads interface parameters and peers in-place when .conf changes,
+        avoiding destroying and recreating the entire object, database engine, tables, etc.
+        """
+        with self.lock:
+            try:
+                self.__parseConfigurationFile()
+                self.getPeers()
+                self.getRestrictedPeers(force=True)
+                configurationInfoJson = self.readConfigurationInfo()
+                if configurationInfoJson:
+                    self.configurationInfo = WireguardConfigurationInfo.model_validate_json(configurationInfoJson.get("Info"))
+                _logger.info(f"Configuration {self.Name} reloaded in-place successfully.")
+            except Exception as e:
+                _logger.error(f"Error during in-place reload of configuration {self.Name}: {e}")
 
     def getPeers(self):
         tmpList = []        
@@ -569,10 +610,17 @@ class WireguardConfiguration:
                     _logger.error(f"{self.Name} getPeers() Error: {e}")
         
         cls = getattr(self, 'peer_class', Peer)
+        peer_cache = {p.id: p for p in self.Peers if isinstance(p, cls)}
         with self.engine.connect() as conn:
             existingPeers = conn.execute(self.peersTable.select()).mappings().fetchall()
             for i in existingPeers:
-                tmpList.append(cls(i, self))
+                pid = i.get('id')
+                if pid in peer_cache:
+                    p_obj = peer_cache[pid]
+                    p_obj.update_attributes(i)
+                    tmpList.append(p_obj)
+                else:
+                    tmpList.append(cls(i, self))
         self.Peers = tmpList
     
     def healPeersWithMissingPrivateKeys(self) -> int:
@@ -624,34 +672,58 @@ class WireguardConfiguration:
                 conn.execute(self.peersTransferTable.insert(), inserts)
     
     def logPeersHistoryEndpoint(self):
-        peer_ids = [tempPeer.id for tempPeer in self.Peers if tempPeer.status == "running"]
-        if not peer_ids:
-            return
-            
-        existing = set()
-        with self.engine.connect() as conn:
-            rows = conn.execute(
-                self.peersHistoryEndpointTable.select().where(
-                    self.peersHistoryEndpointTable.c.id.in_(peer_ids)
-                )
-            ).mappings().fetchall()
-            for r in rows:
-                existing.add((r['id'], r['endpoint']))
-                
-        inserts = []
+        """
+        PERF-10: Efficiently records new endpoint IPs for active peers without loading
+        the entire historical table on every 1-minute execution cycle.
+        """
+        if not hasattr(self, '_seen_endpoints'):
+            self._seen_endpoints = set()
+
+        candidates = []
         now = datetime.now()
         for tempPeer in self.Peers:
             if tempPeer.status == "running":
                 endpoint = tempPeer.endpoint.rsplit(":", 1)    
                 if len(endpoint) == 2 and len(endpoint[0]) > 0:
-                    if (tempPeer.id, endpoint[0]) not in existing:
-                        inserts.append({
-                            "id": tempPeer.id,
-                            "endpoint": endpoint[0],
-                            "time": now
-                        })
-                        existing.add((tempPeer.id, endpoint[0]))
-                        
+                    pair = (tempPeer.id, endpoint[0])
+                    if pair not in self._seen_endpoints:
+                        candidates.append(pair)
+
+        if not candidates:
+            return
+
+        inserts = []
+        with self.engine.connect() as conn:
+            candidate_ids = list({c[0] for c in candidates})
+            existing_db = set()
+            if len(candidates) <= 50:
+                or_clauses = [
+                    (self.peersHistoryEndpointTable.c.id == cid) & (self.peersHistoryEndpointTable.c.endpoint == cep)
+                    for (cid, cep) in candidates
+                ]
+                stmt = self.peersHistoryEndpointTable.select().where(sqlalchemy.or_(*or_clauses))
+                rows = conn.execute(stmt).mappings().fetchall()
+                for r in rows:
+                    existing_db.add((r['id'], r['endpoint']))
+                    self._seen_endpoints.add((r['id'], r['endpoint']))
+            else:
+                stmt = self.peersHistoryEndpointTable.select().where(
+                    self.peersHistoryEndpointTable.c.id.in_(candidate_ids)
+                )
+                rows = conn.execute(stmt).mappings().fetchall()
+                for r in rows:
+                    existing_db.add((r['id'], r['endpoint']))
+                    self._seen_endpoints.add((r['id'], r['endpoint']))
+
+        for (cid, cep) in candidates:
+            if (cid, cep) not in existing_db:
+                inserts.append({
+                    "id": cid,
+                    "endpoint": cep,
+                    "time": now
+                })
+                self._seen_endpoints.add((cid, cep))
+
         if len(inserts) > 0:
             with self.engine.begin() as conn:
                 conn.execute(self.peersHistoryEndpointTable.insert(), inserts)
@@ -810,12 +882,8 @@ class WireguardConfiguration:
                     # Check if error is due to database corruption (malformed / disk image)
                     err_msg = str(db_err).lower()
                     if "malformed" in err_msg or "disk image" in err_msg or "corrupt" in err_msg:
-                        try:
-                            from .DatabaseConnection import heal_database
-                            _logger.warning(f"Detected SQLite corruption during addPeers. Attempting emergency self-healing for wgdashboard...")
-                            heal_database("wgdashboard")
-                        except Exception as heal_ex:
-                            _logger.error(f"Emergency self-healing failed: {heal_ex}")
+                        # PERF-07: Do not swap database file under live requests; log critical alert and rollback
+                        _logger.critical(f"Detected SQLite corruption during addPeers for {self.Name}: {db_err}. Service restart or maintenance mode required.")
 
                     # Rollback kernel
                     for applied_id in applied_keys_to_kernel:
@@ -2356,11 +2424,10 @@ class WireguardConfiguration:
             with self.engine.begin() as db:
                 db.execute(
                     self.peersTransferTable.delete()
-            )
+                )
             with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 if conn.dialect.name == 'sqlite':
-                    print("[WGDashboard] SQLite Vacuuming Database")
-                    conn.execute(sqlalchemy.text('VACUUM;'))
+                    conn.execute(sqlalchemy.text('PRAGMA wal_checkpoint(TRUNCATE);'))
         except Exception as e:
             return False
         return True
@@ -2371,10 +2438,11 @@ class WireguardConfiguration:
                 db.execute(
                     self.peersHistoryEndpointTable.delete()
                 )
+            if hasattr(self, '_seen_endpoints'):
+                self._seen_endpoints.clear()
             with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 if conn.dialect.name == 'sqlite':
-                    print("[WGDashboard] SQLite Vacuuming Database")
-                    conn.execute(sqlalchemy.text('VACUUM;'))
+                    conn.execute(sqlalchemy.text('PRAGMA wal_checkpoint(TRUNCATE);'))
         except Exception as e:
             return False
         return True

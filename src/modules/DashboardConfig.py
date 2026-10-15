@@ -7,7 +7,7 @@ import sqlalchemy as db
 from datetime import datetime
 from typing import Any
 from flask import current_app
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 from .Utilities import (GetRemoteEndpoint, ValidateDNSAddress)
 from .DashboardAPIKey import DashboardAPIKey
 
@@ -108,7 +108,8 @@ class DashboardConfig:
                 if not exist:
                     self.SetConfig(section, key, value, True)
 
-        self.engine = db.create_engine(ConnectionString('wgdashboard'))
+        # PERF-04: Shared engine pool
+        self.engine = get_engine('wgdashboard')
         self.dbMetadata = db.MetaData()
         self.__createAPIKeyTable()
         self.DashboardAPIKeys = self.__getAPIKeys()

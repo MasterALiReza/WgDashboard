@@ -4,6 +4,7 @@ import sqlite3
 import time
 import logging
 from sqlalchemy_utils import database_exists, create_database
+import sqlalchemy
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
@@ -25,7 +26,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=60000")
+        cursor.execute("PRAGMA busy_timeout=10000")
         cursor.execute("PRAGMA cache_size=-64000")
         cursor.close()
 
@@ -145,6 +146,13 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
 
                 # Recover rows: try bulk fetch first; if a corrupted page is hit, fallback to row-by-row
                 rows = []
+                expected_count = 0
+                try:
+                    src_cnt_res = cur_src.execute(f'SELECT count(*) FROM "{table_name}"').fetchone()
+                    if src_cnt_res:
+                        expected_count = src_cnt_res[0]
+                except Exception:
+                    pass
                 try:
                     rows = cur_src.execute(f'SELECT * FROM "{table_name}"').fetchall()
                 except Exception as bulk_err:
@@ -162,6 +170,9 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
                                 break
                     except Exception as scan_err:
                         logger.warning(f"[WGDashboard] Row scan failed for '{table_name}': {scan_err}")
+
+                if expected_count > 0 and len(rows) < expected_count:
+                    logger.error(f"[WGDashboard] Self-heal row count mismatch for table '{table_name}': recovered {len(rows)} of {expected_count} rows!")
 
                 if rows:
                     try:
@@ -196,6 +207,7 @@ def _self_heal_sqlite_if_corrupted(db_path: str, database_name: str, force_check
             dst.close()
 
             if check_res == [('ok',)]:
+                dispose_all()
                 for ext in ["-wal", "-shm"]:
                     if os.path.exists(db_path + ext):
                         try:
@@ -231,6 +243,7 @@ def heal_database(database_name: str) -> bool:
     Public API to trigger an immediate, forced self-healing repair of a database
     if a caller encounters a DatabaseError during runtime.
     """
+    dispose_all()
     config_path = os.getenv('CONFIGURATION_PATH', '.')
     db_file = os.path.join(config_path, "db", f"{database_name}.db")
     if not os.path.exists(db_file) and os.path.exists(os.path.join("db", f"{database_name}.db")):
@@ -239,14 +252,56 @@ def heal_database(database_name: str) -> bool:
     return _self_heal_sqlite_if_corrupted(db_file, database_name, force_check=True)
 
 _initialized_databases = set()
+_ENGINES: dict[str, Engine] = {}
+_ENGINES_LOCK = threading.Lock()
+_CONNECTION_STRINGS: dict[str, str] = {}
+_CS_LOCK = threading.Lock()
+_last_ini_mtime = 0
+
+def get_engine(db_name: str) -> Engine:
+    """
+    PERF-04: Returns a shared singleton SQLAlchemy Engine for the specified database name,
+    preventing file descriptor leaks and thread contention from multiple engine pools.
+    """
+    with _ENGINES_LOCK:
+        if db_name not in _ENGINES:
+            cn = ConnectionString(db_name)
+            if "sqlite" in cn:
+                _ENGINES[db_name] = sqlalchemy.create_engine(cn)
+            else:
+                _ENGINES[db_name] = sqlalchemy.create_engine(cn, pool_size=10, max_overflow=20, pool_pre_ping=True)
+        return _ENGINES[db_name]
+
+def dispose_all():
+    """
+    PERF-04 / GB-01: Closes and disposes all active engine pools and clears the cache.
+    Essential during database restore or maintenance to avoid file lock conflicts.
+    """
+    with _ENGINES_LOCK:
+        for name, engine in list(_ENGINES.items()):
+            try:
+                engine.dispose()
+            except Exception as e:
+                logger.warning(f"[WGDashboard] Error disposing engine {name}: {e}")
+        _ENGINES.clear()
 
 def ConnectionString(database) -> str:    
-    parser = configparser.ConfigParser(strict=False)
+    global _last_ini_mtime
     config_path = os.getenv('CONFIGURATION_PATH', '.')
     ini_path = os.path.join(config_path, 'wg-dashboard.ini')
     if not os.path.exists(ini_path) and os.path.exists('wg-dashboard.ini'):
         ini_path = 'wg-dashboard.ini'
 
+    ini_mtime = os.path.getmtime(ini_path) if os.path.exists(ini_path) else 0
+
+    with _CS_LOCK:
+        if ini_mtime != _last_ini_mtime:
+            _CONNECTION_STRINGS.clear()
+            _last_ini_mtime = ini_mtime
+        if database in _CONNECTION_STRINGS:
+            return _CONNECTION_STRINGS[database]
+
+    parser = configparser.ConfigParser(strict=False)
     if os.path.exists(ini_path):
         try:
             with open(ini_path, "r", encoding="utf-8") as f:
@@ -266,7 +321,8 @@ def ConnectionString(database) -> str:
     else:
         db_file = os.path.join(sqlitePath, f"{database}.db")
         _self_heal_sqlite_if_corrupted(db_file, database)
-        cn = f'sqlite:///{db_file}?timeout=60'
+        # PERF-05: busy_timeout reduced to 10s
+        cn = f'sqlite:///{db_file}?timeout=10'
 
     if cn not in _initialized_databases:
         try:
@@ -279,5 +335,8 @@ def ConnectionString(database) -> str:
             else:
                 logger.error(f"[WGDashboard] Database initialization error for '{database}': {e}")
                 exit(1)
+
+    with _CS_LOCK:
+        _CONNECTION_STRINGS[database] = cn
 
     return cn

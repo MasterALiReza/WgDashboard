@@ -289,6 +289,13 @@ def restore_database_from_sql(db_name: str, sql_content: str) -> bool:
                         except Exception:
                             pass
 
+                # PERF-04 / GB-01: Dispose active connection pools so file handle is free for replacement
+                try:
+                    from .DatabaseConnection import dispose_all
+                    dispose_all()
+                except Exception:
+                    pass
+
                 try:
                     os.replace(tmp_db, db_path)
                 except (PermissionError, OSError) as e:

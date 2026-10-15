@@ -120,6 +120,19 @@ app = Flask("WGDashboard",
             static_folder=os.path.abspath("./static/dist/WGDashboardAdmin"),
             static_url_path=APP_PREFIX_INIT if APP_PREFIX_INIT else '')
 
+@app.errorhandler(TimeoutError)
+def handle_lock_timeout_error(e):
+    """
+    PERF-11: Return 503 with retry message when a ProcessLock times out under heavy concurrency,
+    allowing clients / OxBot to backoff and retry gracefully without experiencing a 500 crash.
+    """
+    app.logger.warning(f"Lock timeout occurred: {e}")
+    return ResponseObject(
+        status=False,
+        message="Server is busy processing another request. Please retry shortly.",
+        status_code=503
+    )
+
 def peerInformationBackgroundThread():
     global WireguardConfigurations
     app.logger.info("Background Thread #1 Started")
@@ -190,16 +203,17 @@ def peerJobScheduleBackgroundThread():
 
 def autoPruneDatabaseLogs():
     """
-    Periodically trims bloated log tables (DashboardLog, JobLog), expired PeerJobs, and checkpoints SQLite databases.
+    PERF-04 / PERF-09: Periodically trims bloated log tables (DashboardLog, JobLog),
+    expired PeerJobs, transfer tracking history (>30 days), and checkpoints SQLite databases.
     Prevents SQLite databases from growing indefinitely and avoids performance bottlenecks.
     """
     try:
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import text, inspect
         import glob
-        from modules.DatabaseConnection import ConnectionString
+        from modules.DatabaseConnection import ConnectionString, get_engine
         
         # 1. Prune SQL Log database
-        log_engine = create_engine(ConnectionString("wgdashboard_log"))
+        log_engine = get_engine("wgdashboard_log")
         try:
             with log_engine.connect() as conn:
                 # Keep latest 5,000 DashboardLog rows
@@ -221,11 +235,11 @@ def autoPruneDatabaseLogs():
                 if log_engine.dialect.name == "sqlite":
                     conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
                     conn.commit()
-        finally:
-            log_engine.dispose()
+        except Exception as e:
+            app.logger.warning(f"[WGDashboard] Error pruning log tables: {e}")
 
         # 2. Prune expired PeerJobs (older than 14 days) and checkpoint wgdashboard_job
-        job_engine = create_engine(ConnectionString("wgdashboard_job"))
+        job_engine = get_engine("wgdashboard_job")
         try:
             cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M:%S")
             with job_engine.connect() as conn:
@@ -237,18 +251,31 @@ def autoPruneDatabaseLogs():
                 if job_engine.dialect.name == "sqlite":
                     conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
                     conn.commit()
-        finally:
-            job_engine.dispose()
+        except Exception as e:
+            app.logger.warning(f"[WGDashboard] Error pruning job tables: {e}")
 
-        # 3. Checkpoint main wgdashboard.db
-        main_engine = create_engine(ConnectionString("wgdashboard"))
+        # 3. Prune peer tracking transfer history (keep 30 days) and checkpoint main wgdashboard.db (PERF-09)
+        main_engine = get_engine("wgdashboard")
         try:
+            cutoff_transfer = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+            inspector = inspect(main_engine)
+            table_names = inspector.get_table_names()
             with main_engine.connect() as conn:
+                for table_name in table_names:
+                    if table_name.endswith("_transfer"):
+                        try:
+                            conn.execute(
+                                text(f'DELETE FROM "{table_name}" WHERE "time" IS NOT NULL AND "time" < :cutoff'),
+                                {"cutoff": cutoff_transfer}
+                            )
+                        except Exception:
+                            pass
+                conn.commit()
                 if main_engine.dialect.name == "sqlite":
                     conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
                     conn.commit()
-        finally:
-            main_engine.dispose()
+        except Exception as e:
+            app.logger.warning(f"[WGDashboard] Error pruning transfer tables: {e}")
 
         # 4. Prune old text log files (keep 7 days, preserve active log files)
         log_dir = os.path.abspath("./log")
@@ -363,23 +390,27 @@ def ProtocolsEnabled() -> list[str]:
 
 def InitWireguardConfigurationsList(startup: bool = False):
     with WireguardConfigurationsLock:
-        if os.path.exists(DashboardConfig.GetConfig("Server", "wg_conf_path")[1]):
-            confs = os.listdir(DashboardConfig.GetConfig("Server", "wg_conf_path")[1])
+        active_wg_confs = set()
+        wg_path = DashboardConfig.GetConfig("Server", "wg_conf_path")[1]
+        if os.path.exists(wg_path):
+            confs = os.listdir(wg_path)
             confs.sort()
             for i in confs:
                 if RegexMatch("^(.{1,}).(conf)$", i):
                     i = i.replace('.conf', '')
+                    active_wg_confs.add(i)
                     try:
                         if i in WireguardConfigurations.keys():
                             if WireguardConfigurations[i].configurationFileChanged():
                                 with app.app_context():
-                                    WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
+                                    WireguardConfigurations[i].reloadConfiguration()
                         else:
                             with app.app_context():
                                 WireguardConfigurations[i] = WireguardConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
                     except WireguardConfiguration.InvalidConfigurationFileException as e:
                         app.logger.error(f"{i} have an invalid configuration file.")
 
+        active_awg_confs = set()
         if "awg" in ProtocolsEnabled():
             awg_path = DashboardConfig.GetConfig("Server", "awg_conf_path")[1]
             if awg_path and os.path.exists(awg_path):
@@ -388,16 +419,24 @@ def InitWireguardConfigurationsList(startup: bool = False):
                 for i in confs:
                     if RegexMatch("^(.{1,}).(conf)$", i):
                         i = i.replace('.conf', '')
+                        active_awg_confs.add(i)
                         try:
                             if i in WireguardConfigurations.keys():
                                 if WireguardConfigurations[i].configurationFileChanged():
                                     with app.app_context():
-                                        WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i)
+                                        WireguardConfigurations[i].reloadConfiguration()
                             else:
                                 with app.app_context():
                                     WireguardConfigurations[i] = AmneziaConfiguration(DashboardConfig, AllPeerJobs, AllPeerShareLinks, DashboardWebHooks, i, startup=startup)
                         except WireguardConfiguration.InvalidConfigurationFileException as e:
                             app.logger.error(f"{i} have an invalid configuration file.")
+
+        # PERF-03: Prune configurations removed from disk
+        all_active_confs = active_wg_confs | active_awg_confs
+        for conf_name in list(WireguardConfigurations.keys()):
+            if conf_name not in all_active_confs:
+                app.logger.info(f"Removing deleted configuration from memory: {conf_name}")
+                del WireguardConfigurations[conf_name]
 
         if startup:
             for conf_name, conf_obj in list(WireguardConfigurations.items()):
@@ -2178,7 +2217,9 @@ def API_ping_execute():
         count = request.args['count']
         try:
             if ip is not None and len(ip) > 0 and count is not None and count.isnumeric():
-                result = ping(ip, count=int(count), source=None)
+                # PERF-08: Cap ping count to 20 to avoid monopolizing Gunicorn worker threads
+                ping_count = min(max(int(count), 1), 20)
+                result = ping(ip, count=ping_count, timeout=2, source=None)
                 data = {
                     "address": result.address,
                     "is_alive": result.is_alive,
@@ -2191,7 +2232,7 @@ def API_ping_execute():
                     "geo": None
                 }
                 try:
-                    r = requests.get(f"https://ip-api.com/json/{result.address}?field=city", timeout=10)
+                    r = requests.get(f"https://ip-api.com/json/{result.address}?field=city", timeout=5)
                     data['geo'] = r.json()
                 except Exception as e:
                     pass
@@ -2207,7 +2248,8 @@ def API_traceroute_execute():
     if "ipAddress" in request.args.keys() and len(request.args.get("ipAddress")) > 0:
         ipAddress = request.args.get('ipAddress')
         try:
-            tracerouteResult = traceroute(ipAddress, timeout=1, max_hops=64)
+            # PERF-08: Cap max_hops to 20 to prevent hanging worker threads
+            tracerouteResult = traceroute(ipAddress, timeout=1, max_hops=20)
             result = []
             for hop in tracerouteResult:
                 if len(result) > 1:

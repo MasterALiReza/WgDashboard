@@ -11,7 +11,7 @@ import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 _jinja_env = SandboxedEnvironment()
 import sqlalchemy as db
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 import logging
 from .PeerJob import PeerJob
 from flask import current_app
@@ -33,6 +33,14 @@ class Peer:
     def __init__(self, tableData, configuration):
         self.configuration = configuration
         self.id = tableData.get("id", "")
+        self.jobs: list[PeerJob] = []
+        self.ShareLink: list[PeerShareLink] = []
+        self.update_attributes(tableData)
+
+    def update_attributes(self, tableData):
+        """
+        PERF-01: Update peer attributes in-place without discarding object or re-running slow constructors.
+        """
         self.private_key = tableData.get("private_key", "")
         self.DNS = tableData.get("DNS", "")
         self.endpoint_allowed_ip = tableData.get("endpoint_allowed_ip", "")
@@ -54,8 +62,6 @@ class Peer:
         self.preshared_key = tableData.get("preshared_key", "")
         self.restricted_reason = tableData.get("restricted_reason", "")
         self.restricted = bool(tableData.get("restricted", False) or self.restricted_reason)
-        self.jobs: list[PeerJob] = []
-        self.ShareLink: list[PeerShareLink] = []
         self.getJobs()
         self.getShareLink()
 
@@ -283,7 +289,7 @@ class Peer:
 
             # Update cross-referenced tables: DashboardClientsPeerAssignment and PeerJobs
             try:
-                main_engine = db.create_engine(ConnectionString("wgdashboard"))
+                main_engine = get_engine("wgdashboard")
                 with main_engine.begin() as m_conn:
                     m_conn.execute(
                         db.text("UPDATE DashboardClientsPeerAssignment SET PeerID = :new_id WHERE PeerID = :old_id"),
@@ -293,7 +299,7 @@ class Peer:
                 pass
 
             try:
-                job_engine = db.create_engine(ConnectionString("wgdashboard_job"))
+                job_engine = get_engine("wgdashboard_job")
                 with job_engine.begin() as j_conn:
                     j_conn.execute(
                         db.text("UPDATE PeerJobs SET Peer = :new_id WHERE Peer = :old_id"),

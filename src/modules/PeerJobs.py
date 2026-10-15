@@ -3,7 +3,7 @@ Peer Jobs
 """
 import sqlalchemy, threading
 
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 from .PeerJob import PeerJob
 from .PeerJobLogger import PeerJobLogger
 import sqlalchemy as db
@@ -45,7 +45,10 @@ class PeerJobs:
     def __init__(self, DashboardConfig, WireguardConfigurations, AllPeerShareLinks):
         self.lock = threading.RLock()
         self.Jobs: list[PeerJob] = []
-        self.engine = db.create_engine(ConnectionString('wgdashboard_job'))
+        self._index: dict[tuple[str, str], list[PeerJob]] = {}
+        self._job_id_index: dict[str, PeerJob] = {}
+        # PERF-04: Use shared engine pool
+        self.engine = get_engine('wgdashboard_job')
         self.metadata = db.MetaData()
         self.peerJobTable = db.Table('PeerJobs', self.metadata,
                                      db.Column('JobID', db.String(255), nullable=False, primary_key=True),
@@ -65,6 +68,16 @@ class PeerJobs:
         self.AllPeerShareLinks = AllPeerShareLinks
         self.cleanJob(init=True)
 
+    def __rebuild_index(self):
+        """PERF-01: Build dictionary index for O(1) job lookups."""
+        idx = {}
+        id_idx = {}
+        for j in self.Jobs:
+            idx.setdefault((j.Configuration, j.Peer), []).append(j)
+            id_idx[j.JobID] = j
+        self._index = idx
+        self._job_id_index = id_idx
+
     def __getJobs(self):
         with self.lock:
             with self.engine.connect() as conn:
@@ -77,6 +90,7 @@ class PeerJobs:
                         job['JobID'], job['Configuration'], job['Peer'], job['Field'], job['Operator'], job['Value'],
                         job['CreationDate'], job['ExpireDate'], job['Action']))
                 self.Jobs = new_jobs
+                self.__rebuild_index()
 
     def getAllJobs(self, configuration: str = None, active_only: bool = False):
         if configuration is not None:
@@ -100,11 +114,18 @@ class PeerJobs:
             return [x.toJson() for x in self.Jobs]
 
     def searchJob(self, Configuration: str, Peer: str):
+        """PERF-01: O(1) dictionary lookup instead of linear filtering."""
         with self.lock:
+            if hasattr(self, '_index'):
+                return list(self._index.get((Configuration, Peer), []))
             return list(filter(lambda x: x.Configuration == Configuration and x.Peer == Peer, self.Jobs))
 
     def searchJobById(self, JobID):
+        """PERF-01: O(1) dictionary lookup by JobID."""
         with self.lock:
+            if hasattr(self, '_job_id_index'):
+                j = self._job_id_index.get(JobID)
+                return [j] if j is not None else []
             return list(filter(lambda x: x.JobID == JobID, self.Jobs))
 
     def saveJob(self, Job: PeerJob) -> tuple[bool, list] | tuple[bool, str]:
@@ -202,6 +223,11 @@ class PeerJobs:
             current_jobs = list(self.Jobs)
 
         needToDelete = []
+        # PERF-06: Group actions by configuration to batch execution and avoid repeated wg-quick save
+        batch_restrict: dict[tuple[str, str], list[tuple[PeerJob, any]]] = {}
+        batch_delete: dict[str, list[tuple[PeerJob, any]]] = {}
+        individual_actions: list[tuple[PeerJob, any, str]] = []
+
         for job in current_jobs:
             try:
                 c = self.WireguardConfigurations.get(job.Configuration)
@@ -220,31 +246,17 @@ class PeerJobs:
                                 x = datetime.now()
                         runAction: bool = self.__runJob_Compare(x, y, job.Operator)
                         if runAction:
-                            s = False
-                            
                             if job.Field in ["total_receive", "total_sent", "total_data"]:
                                 reason = "Volume Limit Reached"
                             else:
                                 reason = "Time Limit Reached"
-                                
-                            with c.lock:
-                                if job.Action == "restrict":
-                                    s, msg = c.restrictPeers([fp.id], reason=reason)
-                                elif job.Action == "delete":
-                                    s, msg = c.deletePeers([fp.id], self, self.AllPeerShareLinks)
-                                elif job.Action == "reset_total_data_usage":
-                                    s = fp.resetDataUsage("total")
-                                    c.restrictPeers([fp.id], reason="Resetting data usage")
-                                    c.allowAccessPeers([fp.id])
-                            if s is True:
-                                self.JobLogger.log(job.JobID, s,
-                                              f"Peer {fp.id} from {c.Name} is successfully {job.Action}ed."
-                                              )
-                                needToDelete.append(job)
+
+                            if job.Action == "restrict":
+                                batch_restrict.setdefault((job.Configuration, reason), []).append((job, fp))
+                            elif job.Action == "delete":
+                                batch_delete.setdefault(job.Configuration, []).append((job, fp))
                             else:
-                                self.JobLogger.log(job.JobID, s,
-                                              f"Peer {fp.id} from {c.Name} failed {job.Action}ed."
-                                              )
+                                individual_actions.append((job, fp, reason))
                     else:
                         self.JobLogger.log(job.JobID, False,
                                       f"Somehow can't find this peer {job.Peer} from {c.Name} failed {job.Action}ed."
@@ -253,6 +265,96 @@ class PeerJobs:
                     self.JobLogger.log(job.JobID, False,
                                   f"Somehow can't find this peer {job.Peer} from {job.Configuration} failed {job.Action}ed."
                                   )
+            except Exception as e:
+                try:
+                    current_app.logger.error(f"Job {job.JobID} evaluation failed: {e}")
+                except Exception:
+                    pass
+                self.JobLogger.log(job.JobID, False, f"Job crashed during evaluation: {e}")
+
+        # Execute batched restrictions (PERF-06: single wg set + single wg-quick save per interface)
+        for (conf_name, reason), items in batch_restrict.items():
+            c = self.WireguardConfigurations.get(conf_name)
+            if not c:
+                continue
+            peer_ids = [fp.id for (job, fp) in items]
+            try:
+                with c.lock:
+                    s, msg = c.restrictPeers(peer_ids, reason=reason)
+                for (job, fp) in items:
+                    if s is True:
+                        self.JobLogger.log(job.JobID, s, f"Peer {fp.id} from {c.Name} is successfully restricted.")
+                        needToDelete.append(job)
+                    else:
+                        self.JobLogger.log(job.JobID, False, f"Peer {fp.id} from {c.Name} failed restricted: {msg}")
+            except TimeoutError as te:
+                try:
+                    current_app.logger.warning(f"Lock timeout during batch restrict on {conf_name}: {te}")
+                except Exception:
+                    pass
+                for (job, fp) in items:
+                    self.JobLogger.log(job.JobID, False, "Server busy (lock timeout); will retry next cycle.")
+            except Exception as e:
+                try:
+                    current_app.logger.error(f"Batch restriction error on {conf_name}: {e}")
+                except Exception:
+                    pass
+                for (job, fp) in items:
+                    self.JobLogger.log(job.JobID, False, f"Job crashed during batch restriction: {e}")
+
+        # Execute batched deletions (PERF-06: single wg set + single wg-quick save per interface)
+        for conf_name, items in batch_delete.items():
+            c = self.WireguardConfigurations.get(conf_name)
+            if not c:
+                continue
+            peer_ids = [fp.id for (job, fp) in items]
+            try:
+                with c.lock:
+                    s, msg = c.deletePeers(peer_ids, self, self.AllPeerShareLinks)
+                for (job, fp) in items:
+                    if s is True:
+                        self.JobLogger.log(job.JobID, s, f"Peer {fp.id} from {c.Name} is successfully deleted.")
+                        needToDelete.append(job)
+                    else:
+                        self.JobLogger.log(job.JobID, False, f"Peer {fp.id} from {c.Name} failed deleted: {msg}")
+            except TimeoutError as te:
+                try:
+                    current_app.logger.warning(f"Lock timeout during batch delete on {conf_name}: {te}")
+                except Exception:
+                    pass
+                for (job, fp) in items:
+                    self.JobLogger.log(job.JobID, False, "Server busy (lock timeout); will retry next cycle.")
+            except Exception as e:
+                try:
+                    current_app.logger.error(f"Batch deletion error on {conf_name}: {e}")
+                except Exception:
+                    pass
+                for (job, fp) in items:
+                    self.JobLogger.log(job.JobID, False, f"Job crashed during batch deletion: {e}")
+
+        # Execute individual actions (e.g. reset_total_data_usage)
+        for (job, fp, reason) in individual_actions:
+            c = self.WireguardConfigurations.get(job.Configuration)
+            if not c:
+                continue
+            try:
+                s = False
+                with c.lock:
+                    if job.Action == "reset_total_data_usage":
+                        s = fp.resetDataUsage("total")
+                        c.restrictPeers([fp.id], reason="Resetting data usage")
+                        c.allowAccessPeers([fp.id])
+                if s is True:
+                    self.JobLogger.log(job.JobID, s, f"Peer {fp.id} from {c.Name} is successfully {job.Action}ed.")
+                    needToDelete.append(job)
+                else:
+                    self.JobLogger.log(job.JobID, s, f"Peer {fp.id} from {c.Name} failed {job.Action}ed.")
+            except TimeoutError as te:
+                try:
+                    current_app.logger.warning(f"Lock timeout during job {job.JobID}: {te}")
+                except Exception:
+                    pass
+                self.JobLogger.log(job.JobID, False, "Server busy (lock timeout); will retry next cycle.")
             except Exception as e:
                 try:
                     current_app.logger.error(f"Job {job.JobID} execution failed: {e}")
@@ -306,11 +408,16 @@ class PeerJobs:
 
 
     def __runJob_Compare(self, x: float | datetime, y: float | datetime, operator: str):
-        if operator == "eq":
+        if operator in ("eq", "==", "str_eq"):
             return x == y
-        if operator == "neq":
+        if operator in ("neq", "!="):
             return x != y
-        if operator == "lgt":
+        if operator in ("lgt", ">"):
             return x > y
-        if operator == "lst":
+        if operator in ("lst", "<"):
             return x < y
+        if operator == ">=":
+            return x >= y
+        if operator == "<=":
+            return x <= y
+        return False

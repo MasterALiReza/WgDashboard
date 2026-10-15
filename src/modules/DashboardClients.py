@@ -8,7 +8,7 @@ import pyotp
 import sqlalchemy as db
 import requests
 
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 from .DashboardClientsPeerAssignment import DashboardClientsPeerAssignment
 from .DashboardClientsTOTP import DashboardClientsTOTP
 from .DashboardOIDC import DashboardOIDC
@@ -20,7 +20,8 @@ from flask import session
 class DashboardClients:
     def __init__(self, wireguardConfigurations):
         self.logger = DashboardLogger()
-        self.engine = db.create_engine(ConnectionString("wgdashboard"))
+        # PERF-04: Shared engine pool
+        self.engine = get_engine("wgdashboard")
         self.metadata = db.MetaData()
         self.OIDC = DashboardOIDC("Client")
         

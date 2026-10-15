@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import requests
 from pydantic import BaseModel, field_serializer
 import sqlalchemy as db
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 from flask import current_app
 
 from concurrent.futures import ThreadPoolExecutor
@@ -44,12 +44,8 @@ class WebHookSessionLogs(BaseModel):
 
 class DashboardWebHooks:
     def __init__(self, DashboardConfig):
-        # SQLite does not support connection pooling; use NullPool for SQLite.
-        _db_type = DashboardConfig.GetConfig("Database", "type")[1]
-        if _db_type == 'sqlite':
-            self.engine = db.create_engine(ConnectionString("wgdashboard"))
-        else:
-            self.engine = db.create_engine(ConnectionString("wgdashboard"), pool_size=5, max_overflow=10)
+        # PERF-04: Shared engine pool
+        self.engine = get_engine("wgdashboard")
         self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="wgd_webhook_worker")
         self.metadata = db.MetaData()
         self.webHooksTable = db.Table(

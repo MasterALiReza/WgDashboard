@@ -8,12 +8,13 @@ import sqlalchemy as db
 from flask import current_app
 from sqlalchemy import RowMapping
 
-from .DatabaseConnection import ConnectionString
+from .DatabaseConnection import ConnectionString, get_engine
 from .Log import Log
 
 class PeerJobLogger:
     def __init__(self, AllPeerJobs, DashboardConfig):
-        self.engine = db.create_engine(ConnectionString("wgdashboard_log"))                
+        # PERF-04: Shared engine pool
+        self.engine = get_engine("wgdashboard_log")                
         self.metadata = db.MetaData()
         self.jobLogTable = db.Table('JobLog', self.metadata,
                                     db.Column('LogID', db.String(255), nullable=False, primary_key=True),
@@ -112,5 +113,4 @@ class PeerJobLogger:
     def vacuum(self):
         with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             if conn.dialect.name == 'sqlite':
-                print("[WGDashboard] SQLite Vacuuming PeerJobLogs Database")
-                conn.execute(db.text('VACUUM;'))
+                conn.execute(db.text('PRAGMA wal_checkpoint(TRUNCATE);'))

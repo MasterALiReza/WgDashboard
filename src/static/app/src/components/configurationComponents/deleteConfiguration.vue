@@ -23,6 +23,7 @@ const deleteConfiguration = () => {
 			store.newMessage("Server", "Configuration deleted", "success")
 		}else{
 			deleting.value = false;
+			store.newMessage("Server", res?.message || "Failed to delete configuration", "danger")
 		}
 	})
 }

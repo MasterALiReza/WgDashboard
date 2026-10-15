@@ -1,6 +1,6 @@
 <script setup>
 import {onBeforeUnmount, onMounted, reactive, ref} from "vue";
-import {fetchGet} from "@/utilities/fetch.js";
+import {fetchGet, fetchPost} from "@/utilities/fetch.js";
 import {useRoute} from "vue-router";
 import dayjs from "dayjs";
 import LocaleText from "@/components/text/localeText.vue";
@@ -26,10 +26,13 @@ const loadBackup = () => {
 }
 
 const createBackup = () => {
-	fetchGet("/api/createWireguardConfigurationBackup", {
+	loading.value = true
+	fetchPost("/api/createWireguardConfigurationBackup", {
 		configurationName: route.params.id
 	}, (res) => {
-		backups.value = res.data;
+		if (res && res.status) {
+			backups.value = res.data;
+		}
 		loading.value = false;
 	})
 }

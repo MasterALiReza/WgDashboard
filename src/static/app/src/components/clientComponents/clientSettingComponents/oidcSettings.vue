@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref} from "vue"
 import LocaleText from "@/components/text/localeText.vue";
-import { fetchGet } from "@/utilities/fetch.js"
+import { fetchGet, fetchPost } from "@/utilities/fetch.js"
 import { DashboardConfigurationStore } from "@/stores/DashboardConfigurationStore"
 
 const props = defineProps(['mode'])
@@ -20,7 +20,7 @@ const getStatus = async () => {
 await getStatus()
 const toggle = async () => {
 	oidcStatusLoading.value = true
-	await fetchGet('/api/oidc/toggle', {
+	await fetchPost('/api/oidc/toggle', {
 		mode: props.mode
 	}, (res) => {
 		if (!res.status){

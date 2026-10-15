@@ -129,12 +129,12 @@
 						</div>
 						<div class="col-sm-8">
 							<select class="form-select form-select-sm border-0 bg-body rounded-3" v-model="auto_backup_schedule" @change="saveSettings" :disabled="!auto_backup || saving_settings">
-								<option value="3h">3 Hours</option>
-								<option value="6h">6 Hours</option>
-								<option value="12h">12 Hours</option>
-								<option value="daily">Daily</option>
-								<option value="weekly">Weekly</option>
-								<option value="monthly">Monthly</option>
+								<option value="3h">{{ GetLocale("3 Hours") }}</option>
+								<option value="6h">{{ GetLocale("6 Hours") }}</option>
+								<option value="12h">{{ GetLocale("12 Hours") }}</option>
+								<option value="daily">{{ GetLocale("Daily") }}</option>
+								<option value="weekly">{{ GetLocale("Weekly") }}</option>
+								<option value="monthly">{{ GetLocale("Monthly") }}</option>
 							</select>
 						</div>
 					</div>
@@ -217,11 +217,13 @@ export default {
 			backupProgress: 0,
 			backupStepLabel: '',
 			_backupEventSource: null,
+			_backupPollTimer: null,
 			// ─── Restore Progress ───────────────────────
 			restoring: false,
 			restoreProgress: 0,
 			restoreStepLabel: '',
 			_restoreEventSource: null,
+			_restorePollTimer: null,
 		};
 	},
 	mounted() {
@@ -272,28 +274,50 @@ export default {
 		},
 		async saveSettings() {
 			this.saving_settings = true;
+			let success = true;
+			let errorMsg = "";
+
 			// Save toggle
 			await fetchPost("/api/updateDashboardConfigurationItem", {
 				section: "GlobalBackup",
 				key: "auto_backup",
 				value: this.auto_backup
-			}, () => {});
-			// Save schedule
-			await fetchPost("/api/updateDashboardConfigurationItem", {
-				section: "GlobalBackup",
-				key: "auto_backup_schedule",
-				value: this.auto_backup_schedule
-			}, () => {});
-			this.store.newMessage("WGDashboard", "Auto Backup settings saved", "success");
+			}, (res) => {
+				if (!res || !res.status) {
+					success = false;
+					errorMsg = res?.message || "Failed to save auto backup setting";
+				}
+			});
+
+			// Save schedule if toggle save was successful
+			if (success) {
+				await fetchPost("/api/updateDashboardConfigurationItem", {
+					section: "GlobalBackup",
+					key: "auto_backup_schedule",
+					value: this.auto_backup_schedule
+				}, (res) => {
+					if (!res || !res.status) {
+						success = false;
+						errorMsg = res?.message || "Failed to save auto backup schedule";
+					}
+				});
+			}
+
+			if (success) {
+				this.store.newMessage("WGDashboard", "Auto Backup settings saved", "success");
+			} else {
+				this.store.newMessage("WGDashboard", errorMsg, "danger");
+				await this.getSettings();
+			}
 			this.saving_settings = false;
 		},
 		async getBackups() {
 			this.loading = true;
 			await fetchGet("/api/globalBackup/list", {}, (res) => {
-				if (res.status) {
-					this.backups = res.data;
+				if (res && res.status) {
+					this.backups = res.data || [];
 				} else {
-					this.store.newMessage("WGDashboard", res.message, "danger");
+					this.store.newMessage("WGDashboard", res?.message || "Failed to retrieve backups", "danger");
 				}
 				this.loading = false;
 			});
@@ -301,15 +325,20 @@ export default {
 		async createBackup() {
 			this.creating = true;
 			this.backupProgress = 0;
-			this.backupStepLabel = 'Initializing...';
-			await fetchPost("/api/globalBackup/create", {}, (res) => {
-				if (res.status && res.data && res.data.job_id) {
-					this._beginBackupProgressTracking(res.data.job_id);
-				} else {
-					this.store.newMessage("WGDashboard", res.message, "danger");
-					this.creating = false;
-				}
-			});
+			this.backupStepLabel = this.GetLocale('Initializing...');
+			try {
+				await fetchPost("/api/globalBackup/create", {}, (res) => {
+					if (res && res.status && res.data && res.data.job_id) {
+						this._beginBackupProgressTracking(res.data.job_id);
+					} else {
+						this.store.newMessage("WGDashboard", res?.message || "Failed to create backup", "danger");
+						this.creating = false;
+					}
+				});
+			} catch (e) {
+				this.store.newMessage("WGDashboard", "Error initiating backup", "danger");
+				this.creating = false;
+			}
 		},
 		confirmDelete(filename) {
 			if (confirm(this.GetLocale("Are you sure you want to delete this global backup?"))) {
@@ -318,16 +347,16 @@ export default {
 		},
 		async deleteBackup(filename) {
 			await fetchPost("/api/globalBackup/delete", {filename: filename}, (res) => {
-				if (res.status) {
+				if (res && res.status) {
 					this.store.newMessage("WGDashboard", "Backup deleted", "success");
 					this.getBackups();
 				} else {
-					this.store.newMessage("WGDashboard", res.message, "danger");
+					this.store.newMessage("WGDashboard", res?.message || "Failed to delete backup", "danger");
 				}
 			});
 		},
 		downloadBackup(filename) {
-			window.open(`/api/globalBackup/download?filename=${encodeURIComponent(filename)}`, '_blank');
+			window.open(getUrl(`/api/globalBackup/download?filename=${encodeURIComponent(filename)}`), '_blank');
 		},
 		confirmRestore(filename) {
 			if (confirm(this.GetLocale("CRITICAL WARNING: Restoring a global backup will OVERWRITE your current database, configurations, and settings. The application will undergo a HARD RESTART. Proceed?"))) {
@@ -341,6 +370,10 @@ export default {
 				this._restoreEventSource.close();
 				this._restoreEventSource = null;
 			}
+			if (this._restorePollTimer) {
+				clearTimeout(this._restorePollTimer);
+				this._restorePollTimer = null;
+			}
 		},
 		_getStepLabel(step) {
 			const labels = {
@@ -351,15 +384,21 @@ export default {
 				restoring_configs:   'Restoring configuration files...',
 				restoring_wireguard: 'Restoring WireGuard interfaces...',
 				restoring_databases: 'Restoring databases & records...',
+				syncing_runtime:     'Syncing runtime state...',
 				finalizing:          'Finalizing restore operation...',
 				done:                'Restore complete! Restarting dashboard...',
 			};
-			return labels[step] || (step ? step : 'Processing...');
+			const label = labels[step] || (step ? step : 'Processing...');
+			return this.GetLocale(label);
 		},
 		_closeBackupSSE() {
 			if (this._backupEventSource) {
 				this._backupEventSource.close();
 				this._backupEventSource = null;
+			}
+			if (this._backupPollTimer) {
+				clearTimeout(this._backupPollTimer);
+				this._backupPollTimer = null;
 			}
 		},
 		_getBackupStepLabel(step) {
@@ -372,10 +411,57 @@ export default {
 				creating_archive:      'Compressing backup archive...',
 				done:                  'Backup completed successfully!',
 			};
-			return labels[step] || (step ? step : 'Processing...');
+			const label = labels[step] || (step ? step : 'Processing...');
+			return this.GetLocale(label);
+		},
+		_pollBackupProgress(jobId) {
+			if (this._backupPollTimer) {
+				clearTimeout(this._backupPollTimer);
+				this._backupPollTimer = null;
+			}
+			const poll = async () => {
+				if (!this.creating) return;
+				await fetchGet(`/api/globalBackup/create/progress/poll/${encodeURIComponent(jobId)}`, {}, (res) => {
+					if (!res || !res.status || !res.data) {
+						this._backupPollTimer = setTimeout(poll, 1500);
+						return;
+					}
+					const data = res.data;
+					this.backupProgress = data.pct || 0;
+					this.backupStepLabel = this._getBackupStepLabel(data.step);
+
+					if (data.error) {
+						this._closeBackupSSE();
+						this.creating = false;
+						this.store.newMessage("WGDashboard", data.error, "danger");
+						return;
+					}
+
+					if (data.done) {
+						this.backupProgress = 100;
+						this.backupStepLabel = this._getBackupStepLabel('done');
+						this._closeBackupSSE();
+						setTimeout(() => {
+							this.creating = false;
+							this.store.newMessage("WGDashboard", "Global backup created successfully", "success");
+							this.getBackups();
+						}, 1500);
+						return;
+					}
+
+					this._backupPollTimer = setTimeout(poll, 1000);
+				});
+			};
+			poll();
 		},
 		_beginBackupProgressTracking(jobId) {
 			this._closeBackupSSE();
+
+			const isCrossServer = !!this.store.getActiveCrossServer();
+			if (isCrossServer) {
+				this._pollBackupProgress(jobId);
+				return;
+			}
 
 			const url = getUrl(`/api/globalBackup/create/progress/${encodeURIComponent(jobId)}`);
 			const es = new EventSource(url);
@@ -411,13 +497,62 @@ export default {
 			es.onerror = () => {
 				this._closeBackupSSE();
 				if (this.creating) {
-					this.creating = false;
-					this.store.newMessage("WGDashboard", "Connection lost during backup.", "danger");
+					this._pollBackupProgress(jobId);
 				}
 			};
 		},
+		_pollRestoreProgress(jobId) {
+			if (this._restorePollTimer) {
+				clearTimeout(this._restorePollTimer);
+				this._restorePollTimer = null;
+			}
+			let pollFailures = 0;
+			const poll = async () => {
+				if (!this.restoring) return;
+				await fetchGet('/api/globalBackup/restore/progress/poll', { job_id: jobId }, (res) => {
+					if (!res || !res.status || !res.data) {
+						pollFailures++;
+						if (this.restoreProgress >= 90 || pollFailures > 5) {
+							this._closeSSE();
+							this._waitForPanelRestart();
+							return;
+						}
+						this._restorePollTimer = setTimeout(poll, 1500);
+						return;
+					}
+					pollFailures = 0;
+					const data = res.data;
+					this.restoreProgress = data.pct || 0;
+					this.restoreStepLabel = this._getStepLabel(data.step);
+
+					if (data.error) {
+						this._closeSSE();
+						this.restoring = false;
+						this.store.newMessage("WGDashboard", data.error, "danger");
+						return;
+					}
+
+					if (data.done) {
+						this.restoreProgress = 100;
+						this.restoreStepLabel = this._getStepLabel('done');
+						this._closeSSE();
+						this._waitForPanelRestart();
+						return;
+					}
+
+					this._restorePollTimer = setTimeout(poll, 1000);
+				});
+			};
+			poll();
+		},
 		_beginProgressTracking(jobId) {
 			this._closeSSE();
+
+			const isCrossServer = !!this.store.getActiveCrossServer();
+			if (isCrossServer) {
+				this._pollRestoreProgress(jobId);
+				return;
+			}
 
 			const url = getUrl(`/api/globalBackup/restore/progress?job_id=${encodeURIComponent(jobId)}`);
 			const es = new EventSource(url);
@@ -450,31 +585,39 @@ export default {
 			es.onerror = () => {
 				// SSE connection dropped — likely because the server is restarting.
 				this._closeSSE();
-				if (this.restoreProgress >= 95) {
+				if (this.restoreProgress >= 90) {
 					// Looks like restore succeeded and server is restarting — wait and reload.
 					this._waitForPanelRestart();
 				} else if (this.restoring) {
-					this.restoring = false;
-					this.store.newMessage("WGDashboard", "Connection lost during restore. Please check server logs.", "danger");
+					this._pollRestoreProgress(jobId);
 				}
 			};
 		},
 		_waitForPanelRestart() {
-			// Poll /api/getDashboardConfiguration every 2 seconds until server is back.
-			this.restoreStepLabel = 'Waiting for panel to restart...';
+			// Poll /api/handshake every 2 seconds until server is back.
+			this.restoreStepLabel = this.GetLocale('Waiting for panel to restart...');
 			const maxAttempts = 60; // up to 2 min
 			let attempts = 0;
+			let serverWentDown = false;
+			const handshakeUrl = getUrl('/api/handshake');
+
 			const poll = () => {
-				fetch('/api/getDashboardConfiguration', { method: 'GET' })
+				attempts++;
+				fetch(handshakeUrl, { method: 'GET', headers: getHeaders(), cache: 'no-store' })
 					.then(r => {
 						if (r.ok) {
-							window.location.reload();
+							if (serverWentDown || attempts >= 3) {
+								window.location.reload();
+							} else {
+								setTimeout(poll, 2000);
+							}
 						} else {
+							serverWentDown = true;
 							throw new Error('not ready');
 						}
 					})
 					.catch(() => {
-						attempts++;
+						serverWentDown = true;
 						if (attempts < maxAttempts) {
 							setTimeout(poll, 2000);
 						} else {
@@ -545,9 +688,9 @@ export default {
 					});
 				}
 
-				if (!res.status) {
+				if (!res || !res.status) {
 					this.restoring = false;
-					this.store.newMessage("WGDashboard", res.message || "Failed to start restore", "danger");
+					this.store.newMessage("WGDashboard", res?.message || "Failed to start restore", "danger");
 					return;
 				}
 

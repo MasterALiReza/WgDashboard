@@ -23,7 +23,7 @@ const deleteBackup = () => {
 			emit("refresh")
 			store.newMessage("Server", "Backup deleted", "success")
 		}else{
-			store.newMessage("Server", "Backup failed to delete", "danger")
+			store.newMessage("Server", res?.message || "Backup failed to delete", "danger")
 		}
 	})
 }
@@ -40,7 +40,7 @@ const restoreBackup = () => {
 			emit("refreshPeersList")
 			store.newMessage("Server", "Backup restored with " + props.b.filename, "success")
 		}else{
-			store.newMessage("Server", "Backup failed to restore", "danger")
+			store.newMessage("Server", res?.message || "Backup failed to restore", "danger")
 		}
 	})
 }

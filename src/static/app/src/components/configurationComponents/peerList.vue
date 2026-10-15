@@ -88,25 +88,27 @@ const fetchPeerList = async () => {
 	}, (res) => {
 		if (res.status){
 			configurationInfo.value = res.data.configurationInfo;
-			configurationPeers.value = res.data.configurationPeers;
+			const restrictedPeers = res.data.configurationRestrictedPeers || [];
+			const restrictedIds = new Set(restrictedPeers.map(x => x.id));
+			const activePeers = (res.data.configurationPeers || []).filter(p => !restrictedIds.has(p.id));
 			
-			configurationPeers.value.forEach(p => {
-				p.restricted = false
+			activePeers.forEach(p => {
+				p.restricted = false;
 				p.configuration = {
 					Name: route.params.id,
 					Protocol: configurationInfo.value.Protocol,
 					ListenPort: configurationInfo.value.ListenPort
-				}
-			})
-			res.data.configurationRestrictedPeers.forEach(x => {
+				};
+			});
+			restrictedPeers.forEach(x => {
 				x.restricted = true;
 				x.configuration = {
 					Name: route.params.id,
 					Protocol: configurationInfo.value.Protocol,
 					ListenPort: configurationInfo.value.ListenPort
-				}
-				configurationPeers.value.push(x)
-			})
+				};
+			});
+			configurationPeers.value = [...activePeers, ...restrictedPeers];
 		}
 	})
 }

@@ -35,52 +35,68 @@ export const getUrl = (url) => {
 }
 
 export const fetchGet = async (url, params=undefined, callback=undefined) => {
-	const urlSearchParams = new URLSearchParams(params);
-	await fetch(`${getUrl(url)}?${urlSearchParams.toString()}`, {
-		headers: getHeaders()
-	})
-		.then((x) => {
-			const store = DashboardConfigurationStore();
-			if (!x.ok){
-				if (x.status !== 200){
-					if (x.status === 401){
-						store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-					}
-					throw { status: x.status, statusText: x.statusText }
-				}
-			}else{
-				return x.json()
-			}
-		})
-		.then(x => callback ? callback(x) : undefined).catch(x => {
-			console.log("Error:", x)
-			if (x && x.status === 401) {
-				router.push({path: '/signin'})
-			}
-	})
+	if (typeof params === 'function') {
+		callback = params;
+		params = undefined;
+	}
+	let fullUrl = getUrl(url);
+	if (params && Object.keys(params).length > 0) {
+		const urlSearchParams = new URLSearchParams(params);
+		fullUrl = `${fullUrl}?${urlSearchParams.toString()}`;
+	}
+	try {
+		const x = await fetch(fullUrl, {
+			headers: getHeaders()
+		});
+		let data = null;
+		try {
+			data = await x.json();
+		} catch {
+			data = { status: false, message: `HTTP ${x.status}` };
+		}
+		if (data && typeof data === 'object' && !('status' in data) && !x.ok) {
+			data.status = false;
+		}
+		if (x.status === 401) {
+			DashboardConfigurationStore().newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning");
+			router.push({ path: '/signin' });
+		}
+		if (x.status === 503) {
+			DashboardConfigurationStore().newMessage("WGDashboard", data?.message || "Maintenance in progress", "warning");
+		}
+		if (callback) callback(data);
+	} catch (e) {
+		console.error("fetchGet error:", e);
+		if (callback) callback({ status: false, message: "Network error" });
+	}
 }
 
-export const fetchPost = async (url, body, callback) => {
-	await fetch(`${getUrl(url)}`, {
-		headers: getHeaders(),
-		method: "POST",
-		body: JSON.stringify(body)
-	}).then((x) => {
-		const store = DashboardConfigurationStore();
-		if (!x.ok){
-			if (x.status !== 200){
-				if (x.status === 401){
-					store.newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning")
-				}
-				throw { status: x.status, statusText: x.statusText }
-			}
-		}else{
-			return x.json()
+export const fetchPost = async (url, body, callback=undefined) => {
+	try {
+		const x = await fetch(getUrl(url), {
+			headers: getHeaders(),
+			method: "POST",
+			body: JSON.stringify(body)
+		});
+		let data = null;
+		try {
+			data = await x.json();
+		} catch {
+			data = { status: false, message: `HTTP ${x.status}` };
 		}
-	}).then(x => callback ? callback(x) : undefined).catch(x => {
-		console.log("Error:", x)
-		if (x && x.status === 401) {
-			router.push({path: '/signin'})
+		if (data && typeof data === 'object' && !('status' in data) && !x.ok) {
+			data.status = false;
 		}
-	})
+		if (x.status === 401) {
+			DashboardConfigurationStore().newMessage("WGDashboard", "Sign in session ended, please sign in again", "warning");
+			router.push({ path: '/signin' });
+		}
+		if (x.status === 503) {
+			DashboardConfigurationStore().newMessage("WGDashboard", data?.message || "Maintenance in progress", "warning");
+		}
+		if (callback) callback(data);
+	} catch (e) {
+		console.error("fetchPost error:", e);
+		if (callback) callback({ status: false, message: "Network error" });
+	}
 }

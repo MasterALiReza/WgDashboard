@@ -1595,7 +1595,13 @@ class WireguardConfiguration:
                     )
                 ).mappings().first()
                 if existing:
-                    return dict(existing)
+                    res = dict(existing)
+                    r = float(res.get('total_receive') or 0.0)
+                    s = float(res.get('total_sent') or 0.0)
+                    d = float(res.get('total_data') or 0.0)
+                    if d > (r + s + 0.0001):
+                        res['total_data'] = r + s
+                    return res
         except Exception as e:
             try:
                 _logger.error(f"{self.Name} _get_traffic_snapshot() Error: {e}")
@@ -1646,6 +1652,7 @@ class WireguardConfiguration:
                             last_updated  = now
                         )
                     )
+            self._last_data_usage_time = 0.0
         except Exception as e:
             _logger.error(f"{self.Name} _add_to_traffic_snapshot() Error: {e}")
             raise e
@@ -1691,7 +1698,12 @@ class WireguardConfiguration:
                             ).label('total'),
                         )
                     ).mappings().first()
-                    return (row['recv'] or 0.0), (row['sent'] or 0.0), (row['total'] or 0.0)
+                    t_recv = float(row['recv'] or 0.0)
+                    t_sent = float(row['sent'] or 0.0)
+                    t_total = float(row['total'] or 0.0)
+                    if t_total > (t_recv + t_sent + 0.0001):
+                        t_total = t_recv + t_sent
+                    return t_recv, t_sent, t_total
 
                 a_recv, a_sent, a_total = _sum_table(self.peersTable)
                 r_recv, r_sent, r_total = _sum_table(self.peersRestrictedTable)

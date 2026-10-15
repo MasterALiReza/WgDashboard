@@ -313,3 +313,119 @@ def test_tu06_refresh_runtime_stats_lock_on_cumu_updates(tmp_path):
 
     # Rollover was triggered -> lock.__enter__ should have been called!
     assert cfg.lock.__enter__.called is True
+
+
+def test_partial_reset_modes(tmp_path):
+    """
+    Test resetDataUsage in mode='receive' and mode='sent'.
+    Verifies that directional resets update snapshot correctly and keep total_data == total_receive + total_sent.
+    """
+    cfg = create_mock_configuration(tmp_path)
+    peer_data = {
+        "id": "PEER_PARTIAL=",
+        "name": "PartialPeer",
+        "total_receive": 3.0,
+        "total_sent": 5.0,
+        "total_data": 8.0,
+        "cumu_receive": 1.0,
+        "cumu_sent": 2.0,
+        "cumu_data": 3.0,
+        "endpoint": "N/A",
+        "status": "stopped",
+        "latest_handshake": "N/A",
+        "allowed_ip": "10.0.0.4/32"
+    }
+
+    with cfg.engine.begin() as conn:
+        conn.execute(cfg.peersTable.insert().values(**peer_data))
+
+    cfg.lock = MagicMock()
+    peer = Peer(peer_data, cfg)
+
+    # 1. Reset receive only
+    peer.resetDataUsage(mode="receive")
+    snap1 = cfg._get_traffic_snapshot()
+    assert snap1 is not None
+    # Receive was 1.0 + 3.0 = 4.0; Sent remains 0.0 in snapshot
+    assert snap1["total_receive"] == 4.0
+    assert snap1["total_sent"] == 0.0
+    assert snap1["total_data"] == 4.0
+
+    # 2. Reset sent only
+    peer.resetDataUsage(mode="sent")
+    snap2 = cfg._get_traffic_snapshot()
+    assert snap2 is not None
+    # Sent was 2.0 + 5.0 = 7.0; Total in snapshot = 4.0 + 7.0 = 11.0
+    assert snap2["total_receive"] == 4.0
+    assert snap2["total_sent"] == 7.0
+    assert snap2["total_data"] == 11.0
+    assert round(snap2["total_data"] - (snap2["total_receive"] + snap2["total_sent"]), 4) == 0.0
+
+
+def test_batch_peer_deletion(tmp_path):
+    """
+    Test deleting multiple peers (active, restricted, and zero usage) in a single batch.
+    Verifies atomic batch snapshot addition without duplicate cumulative data.
+    """
+    cfg = create_mock_configuration(tmp_path)
+
+    # Peer 1 (active): cumu=5.0 (recv=2, sent=3), total=0
+    # Peer 2 (restricted): cumu=0, total=4.0 (recv=1, sent=3)
+    # Peer 3 (active): cumu=0, total=0
+    with cfg.engine.begin() as conn:
+        conn.execute(cfg.peersTable.insert().values(
+            id="PEER_1=", name="P1", cumu_receive=2.0, cumu_sent=3.0, cumu_data=5.0,
+            total_receive=0.0, total_sent=0.0, total_data=0.0
+        ))
+        conn.execute(cfg.peersRestrictedTable.insert().values(
+            id="PEER_2=", name="P2", cumu_receive=0.0, cumu_sent=0.0, cumu_data=0.0,
+            total_receive=1.0, total_sent=3.0, total_data=4.0
+        ))
+        conn.execute(cfg.peersTable.insert().values(
+            id="PEER_3=", name="P3", cumu_receive=0.0, cumu_sent=0.0, cumu_data=0.0,
+            total_receive=0.0, total_sent=0.0, total_data=0.0
+        ))
+
+    # Simulate deletePeers loop logic
+    peers_to_delete = [
+        (MagicMock(id="PEER_1="), False),
+        (MagicMock(id="PEER_2="), True),
+        (MagicMock(id="PEER_3="), False)
+    ]
+
+    with cfg.engine.begin() as conn:
+        batch_recv = 0.0
+        batch_sent = 0.0
+        batch_data = 0.0
+
+        for pf, is_restricted in peers_to_delete:
+            stmt_peer = cfg.peersTable.select().where(cfg.peersTable.c.id == pf.id)
+            db_row = conn.execute(stmt_peer).mappings().fetchone()
+            if not db_row:
+                stmt_restricted = cfg.peersRestrictedTable.select().where(cfg.peersRestrictedTable.c.id == pf.id)
+                db_row = conn.execute(stmt_restricted).mappings().fetchone()
+
+            if db_row:
+                p_recv = max(0.0, float(db_row.get('cumu_receive') or 0.0) + float(db_row.get('total_receive') or 0.0))
+                p_sent = max(0.0, float(db_row.get('cumu_sent') or 0.0) + float(db_row.get('total_sent') or 0.0))
+                p_data = p_recv + p_sent
+            else:
+                p_recv = p_sent = p_data = 0.0
+
+            batch_recv += p_recv
+            batch_sent += p_sent
+            batch_data += p_data
+
+        if batch_data > 0.0:
+            cfg._add_to_traffic_snapshot(conn, batch_recv, batch_sent, batch_data)
+
+    snap = cfg._get_traffic_snapshot()
+    # P1: recv=2, sent=3 -> data=5
+    # P2: recv=1, sent=3 -> data=4
+    # P3: 0
+    # Expected: recv=3, sent=6, data=9
+    assert snap["total_receive"] == 3.0
+    assert snap["total_sent"] == 6.0
+    assert snap["total_data"] == 9.0
+    assert round(snap["total_data"] - (snap["total_receive"] + snap["total_sent"]), 4) == 0.0
+

@@ -507,7 +507,7 @@ class WireguardConfiguration:
         with self.lock:
             try:
                 self.__parseConfigurationFile()
-                self.getPeers()
+                self.getPeers(force=True)
                 self.getRestrictedPeers(force=True)
                 configurationInfoJson = self.readConfigurationInfo()
                 if configurationInfoJson:
@@ -516,9 +516,9 @@ class WireguardConfiguration:
             except Exception as e:
                 _logger.error(f"Error during in-place reload of configuration {self.Name}: {e}")
 
-    def getPeers(self):
+    def getPeers(self, force: bool = False):
         tmpList = []        
-        if self.configurationFileChanged():
+        if force or self.configurationFileChanged():
             with open(self.configPath, 'r') as configFile:
                 p = []
                 pCounter = -1

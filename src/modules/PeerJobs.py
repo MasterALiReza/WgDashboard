@@ -404,6 +404,8 @@ class PeerJobs:
                 )
                 self.JobLogger.deleteLogs(JobID=job_id)
                 self.JobLogger.log(job_id, Message=f"Job is removed due to being stale.")
+        if len(failingJobs) > 0:
+            self.__getJobs()
         
 
 

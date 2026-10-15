@@ -207,7 +207,7 @@ class DashboardWebHooks:
 
 class WebHookSession:
     def __init__(self, webHook: WebHook, data: dict[str, str], engine=None):
-        self.engine = engine if engine is not None else db.create_engine(ConnectionString("wgdashboard"))
+        self.engine = engine if engine is not None else get_engine("wgdashboard")
         self.metadata = db.MetaData()
         self.webHookSessionsTable = db.Table('DashboardWebHookSessions', self.metadata, autoload_with=self.engine)
         self.webHook = webHook

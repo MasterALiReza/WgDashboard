@@ -1935,9 +1935,26 @@ def API_getConfigurationInfo():
     if not configurationName or configurationName not in WireguardConfigurations.keys():
         return ResponseObject(False, "Please provide configuration name", status_code=400)
     config = WireguardConfigurations[configurationName]
+
+    include_peers = request.args.get("include_peers", "true").lower() != "false"
+    peer_id = request.args.get("peer_id") or request.args.get("id")
+
+    if not include_peers:
+        return ResponseObject(data={
+            "configurationInfo": config.toJson(),
+            "configurationPeers": [],
+            "configurationRestrictedPeers": []
+        })
+
     restricted_peers = config.getRestrictedPeersList() or []
     restricted_ids = {p.id for p in restricted_peers}
     active_peers = [p for p in (config.Peers or []) if p.id not in restricted_ids and not getattr(p, 'restricted', False)]
+
+    if peer_id:
+        p_clean = peer_id.strip().replace(' ', '+')
+        active_peers = [p for p in active_peers if p.id == p_clean or p.id == peer_id or getattr(p, 'name', '') == peer_id]
+        restricted_peers = [p for p in restricted_peers if p.id == p_clean or p.id == peer_id or getattr(p, 'name', '') == peer_id]
+
     return ResponseObject(data={
         "configurationInfo": config.toJson(),
         "configurationPeers": active_peers,

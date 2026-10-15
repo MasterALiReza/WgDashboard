@@ -236,6 +236,76 @@ class TestPerformanceAndStability(unittest.TestCase):
             self.assertIn("busy", data["message"])
             self.assertIn("retry", data["message"].lower())
 
+    def test_perf02_get_wireguard_configuration_info_filtering(self):
+        """PERF-02: API_getConfigurationInfo supports lightweight peer_id and include_peers filtering."""
+        from dashboard import app, WireguardConfigurations
+
+        mock_conf = MagicMock()
+        mock_conf.toJson.return_value = {"Name": "wg_test"}
+        peer1 = MagicMock()
+        peer1.id = "peer-alpha"
+        peer1.name = "Alpha"
+        peer1.restricted = False
+        peer1.toJson.return_value = {"id": "peer-alpha", "name": "Alpha"}
+        peer2 = MagicMock()
+        peer2.id = "peer-beta"
+        peer2.name = "Beta"
+        peer2.restricted = False
+        peer2.toJson.return_value = {"id": "peer-beta", "name": "Beta"}
+
+        mock_conf.Peers = [peer1, peer2]
+        mock_conf.getRestrictedPeersList.return_value = []
+        WireguardConfigurations["wg_test"] = mock_conf
+
+        from dashboard import DashboardConfig
+
+        orig_gc = DashboardConfig.GetConfig
+        def fake_gc(sec, key):
+            if sec == "Server" and key == "auth_req":
+                return True, False
+            return orig_gc(sec, key)
+
+        with patch.object(DashboardConfig, "GetConfig", side_effect=fake_gc):
+            client = app.test_client()
+
+            # 1. include_peers=false returns empty peer arrays
+            resp = client.get("/api/getWireguardConfigurationInfo?configurationName=wg_test&include_peers=false")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()["data"]
+            self.assertEqual(data["configurationPeers"], [])
+            self.assertEqual(data["configurationRestrictedPeers"], [])
+
+            # 2. peer_id filter returns only matching peer
+            resp = client.get("/api/getWireguardConfigurationInfo?configurationName=wg_test&peer_id=peer-alpha")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()["data"]
+            self.assertEqual(len(data["configurationPeers"]), 1)
+            self.assertEqual(data["configurationPeers"][0]["id"], "peer-alpha")
+
+        # Clean up
+        WireguardConfigurations.pop("wg_test", None)
+
+    def test_perf03_reload_configuration_force_peers(self):
+        """PERF-03: WireguardConfiguration.reloadConfiguration invokes getPeers with force=True."""
+        from modules.WireguardConfiguration import WireguardConfiguration
+
+        with patch.object(WireguardConfiguration, "__init__", lambda self, *args, **kwargs: None):
+            wgc = WireguardConfiguration()
+            wgc.Name = "wg_reload_test"
+            wgc.lock = MagicMock()
+            wgc.lock.__enter__ = MagicMock(return_value=None)
+            wgc.lock.__exit__ = MagicMock(return_value=None)
+            wgc._WireguardConfiguration__parseConfigurationFile = MagicMock()
+            wgc.getPeers = MagicMock()
+            wgc.getRestrictedPeers = MagicMock()
+            wgc.readConfigurationInfo = MagicMock(return_value=None)
+
+            wgc.reloadConfiguration()
+
+            wgc._WireguardConfiguration__parseConfigurationFile.assert_called_once()
+            wgc.getPeers.assert_called_once_with(force=True)
+            wgc.getRestrictedPeers.assert_called_once_with(force=True)
+
 
 if __name__ == "__main__":
     unittest.main()

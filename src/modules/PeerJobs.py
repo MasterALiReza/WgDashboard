@@ -7,8 +7,39 @@ from .DatabaseConnection import ConnectionString
 from .PeerJob import PeerJob
 from .PeerJobLogger import PeerJobLogger
 import sqlalchemy as db
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import current_app
+
+def _parse_job_datetime(val: str) -> tuple[datetime, bool]:
+    """
+    Parses a date string, ISO-8601 with timezone offset, or unix timestamp.
+    Returns (datetime_object, is_utc_aware).
+    """
+    val_str = str(val).strip()
+    # 1. UNIX epoch timestamp
+    try:
+        if val_str.replace('.', '', 1).isdigit() and len(val_str) >= 9:
+            return datetime.fromtimestamp(float(val_str), tz=timezone.utc), True
+    except Exception:
+        pass
+
+    # 2. ISO-8601 with 'T' or timezone offset
+    try:
+        dt = datetime.fromisoformat(val_str.replace('Z', '+00:00'))
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc), True
+        return dt, False
+    except Exception:
+        pass
+
+    # 3. Standard naive string format '%Y-%m-%d %H:%M:%S'
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(val_str, fmt), False
+        except Exception:
+            pass
+
+    raise ValueError(f"Invalid date/time format for job value: {val}")
 
 class PeerJobs:
     def __init__(self, DashboardConfig, WireguardConfigurations, AllPeerShareLinks):
@@ -182,8 +213,11 @@ class PeerJobs:
                             x: float = float((getattr(fp, f"total_{s}", 0.0) or 0.0) + (getattr(fp, f"cumu_{s}", 0.0) or 0.0))
                             y: float = float(job.Value)
                         else:
-                            x: datetime = datetime.now()
-                            y: datetime = datetime.strptime(job.Value, "%Y-%m-%d %H:%M:%S")
+                            y, is_utc = _parse_job_datetime(job.Value)
+                            if is_utc:
+                                x = datetime.now(timezone.utc)
+                            else:
+                                x = datetime.now()
                         runAction: bool = self.__runJob_Compare(x, y, job.Operator)
                         if runAction:
                             s = False

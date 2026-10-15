@@ -240,7 +240,7 @@ class WireguardConfiguration:
                 for i in range(start, len(original)):
                     if original[i] == "[Peer]":
                         break
-                    split = re.split(r'\s*=\s*', original[i], 1)
+                    split = re.split(r'\s*=\s*', original[i], maxsplit=1)
                     if len(split) == 2:
                         key = split[0]
                         if key in dir(self):
@@ -253,7 +253,7 @@ class WireguardConfiguration:
                 for i in range(start, len(original)):
                     if original[i] == "[Peer]":
                         break
-                    split = re.split(r'\s*=\s*', original[i], 1)
+                    split = re.split(r'\s*=\s*', original[i], maxsplit=1)
                     if len(split) == 2:
                         key = split[0]
                         value = split[1]
@@ -857,10 +857,11 @@ class WireguardConfiguration:
             return True, p
         return False, None
 
-    def allowAccessPeers(self, listOfPublicKeys) -> tuple[bool, str]:
+    def allowAccessPeers(self, listOfPublicKeys, force: bool = False) -> tuple[bool, str]:
         with self.lock:
             # Step 1: Read restricted peer definitions outside transaction
             peers_to_allow = []
+            blocked_for_volume = []
             with self.engine.connect() as conn:
                 for i in listOfPublicKeys:
                     stmt = self.peersRestrictedTable.select().where(
@@ -868,9 +869,17 @@ class WireguardConfiguration:
                     )
                     restrictedPeer = conn.execute(stmt).mappings().fetchone()
                     if restrictedPeer is not None:
-                        peers_to_allow.append(dict(restrictedPeer))
+                        r_dict = dict(restrictedPeer)
+                        reason = r_dict.get('restricted_reason') or ''
+                        used = float(r_dict.get('cumu_data') or 0.0) + float(r_dict.get('total_data') or 0.0)
+                        if not force and reason == "Volume Limit Reached" and used > 0:
+                            blocked_for_volume.append(i)
+                        else:
+                            peers_to_allow.append(r_dict)
 
             if not peers_to_allow:
+                if blocked_for_volume:
+                    return False, "Cannot allow access: peer has reached volume limit (use force=True or add volume first)"
                 return False, "Failed to allow access of specified peer(s)"
 
             # Step 2: Configure WireGuard interface outside DB transaction if active
@@ -927,6 +936,14 @@ class WireguardConfiguration:
             self._peers_dict = None
             self.getPeers()
             self.getRestrictedPeers(force=True)
+            if len(successfully_applied_keys) > 0:
+                try:
+                    self.DashboardWebHooks.RunWebHook("peer_allowed", {
+                        "configuration": self.Name,
+                        "peers": successfully_applied_keys
+                    })
+                except Exception as e:
+                    _logger.error(f"Error triggering peer_allowed webhook: {e}")
             if failed_count == 0:
                 return True, "Allow access successfully"
             return len(successfully_applied_keys) > 0, f"Allowed {len(successfully_applied_keys)} peer(s), {failed_count} failed."
@@ -939,14 +956,37 @@ class WireguardConfiguration:
             listOfPublicKeys = list(dict.fromkeys(listOfPublicKeys))
             # Step 1: Find valid peers to restrict
             peers_to_restrict = []
+            already_restricted_count = 0
             for p in listOfPublicKeys:
                 found, pf = self.searchPeer(p)
                 if found:
                     peers_to_restrict.append(pf)
                 else:
-                    numOfFailedToRestrictPeers += 1
+                    is_already_restricted = False
+                    for rp in (self.RestrictedPeers or []):
+                        if rp.id == p or rp.id == (p.strip().replace(' ', '+') if p else p):
+                            is_already_restricted = True
+                            already_restricted_count += 1
+                            if reason:
+                                try:
+                                    with self.engine.begin() as conn:
+                                        conn.execute(
+                                            self.peersRestrictedTable.update().values({
+                                                "restricted_reason": reason
+                                            }).where(
+                                                self.peersRestrictedTable.columns.id == rp.id
+                                            )
+                                        )
+                                    rp.restricted_reason = reason
+                                except Exception as e:
+                                    _logger.error(f"Error updating restricted reason for {rp.id}: {e}")
+                            break
+                    if not is_already_restricted:
+                        numOfFailedToRestrictPeers += 1
 
             if not peers_to_restrict:
+                if already_restricted_count > 0 and (already_restricted_count + numOfFailedToRestrictPeers) == len(listOfPublicKeys) and numOfFailedToRestrictPeers == 0:
+                    return True, "Specified peer(s) are already restricted"
                 return False, f"No active peer(s) found to restrict"
 
             # Step 2: Remove peers from WireGuard kernel runtime outside DB transaction if running
@@ -978,7 +1018,7 @@ class WireguardConfiguration:
                         conn.execute(
                             self.peersRestrictedTable.update().values({
                                 "status": "stopped",
-                                "restricted_reason": reason
+                                "restricted_reason": reason if reason else "Manually Restricted"
                             }).where(
                                 self.peersRestrictedTable.columns.id == peer_id
                             )
@@ -998,6 +1038,15 @@ class WireguardConfiguration:
             self._peers_dict = None
             self.getRestrictedPeers(force=True)
             self.getPeers()
+            if len(removed_peer_ids) > 0:
+                try:
+                    self.DashboardWebHooks.RunWebHook("peer_restricted", {
+                        "configuration": self.Name,
+                        "peers": removed_peer_ids,
+                        "reason": reason
+                    })
+                except Exception as e:
+                    _logger.error(f"Error triggering peer_restricted webhook: {e}")
             if numOfRestrictedPeers == len(listOfPublicKeys):
                 return True, f"Restricted {numOfRestrictedPeers} peer(s)"
             return False, f"Restricted {numOfRestrictedPeers} peer(s) successfully. Failed to restrict {numOfFailedToRestrictPeers} peer(s)"

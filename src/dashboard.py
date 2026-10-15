@@ -4,7 +4,7 @@ import time, re, uuid, bcrypt, psutil, pyotp, threading, signal
 import traceback
 from uuid import uuid4
 from zipfile import ZipFile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import sqlalchemy
 from jinja2.sandbox import SandboxedEnvironment
@@ -32,11 +32,47 @@ from modules.DashboardLogger import DashboardLogger
 from modules.PeerJob import PeerJob
 from modules.SystemStatus import SystemStatus
 from modules.PeerShareLinks import PeerShareLinks
-from modules.PeerJobs import PeerJobs
+from modules.PeerJobs import PeerJobs, _parse_job_datetime
 from modules.DashboardConfig import DashboardConfig
 from modules.WireguardConfiguration import WireguardConfiguration
 from modules.AmneziaConfiguration import AmneziaConfiguration
 from modules.GlobalBackup import GlobalBackupManager, _restore_jobs, _restore_jobs_lock, _cleanup_expired_jobs, _backup_jobs, _backup_jobs_lock, _is_backup_running_lock
+
+try:
+    import qrcode
+    import io
+    import base64
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
+
+_idempotency_cache = {}
+_idempotency_lock = threading.Lock()
+_IDEMPOTENCY_TTL_SECONDS = 3600
+
+def _get_idempotent_response(key: str):
+    if not key:
+        return None
+    with _idempotency_lock:
+        entry = _idempotency_cache.get(key)
+        if entry:
+            res_data, timestamp = entry
+            if time.time() - timestamp < _IDEMPOTENCY_TTL_SECONDS:
+                return res_data
+            else:
+                del _idempotency_cache[key]
+    return None
+
+def _store_idempotent_response(key: str, data: dict):
+    if not key:
+        return
+    with _idempotency_lock:
+        now = time.time()
+        if len(_idempotency_cache) > 1000:
+            expired = [k for k, v in _idempotency_cache.items() if now - v[1] >= _IDEMPOTENCY_TTL_SECONDS]
+            for k in expired:
+                del _idempotency_cache[k]
+        _idempotency_cache[key] = (data, now)
 
 from client import createClientBlueprint
 
@@ -455,6 +491,14 @@ BOT_ALLOWED_ENDPOINTS = {
     f"{APP_PREFIX}/api/savePeerScheduleJob",
     f"{APP_PREFIX}/api/deletePeerScheduleJob",
     f"{APP_PREFIX}/api/handshake",
+    # API v2 endpoints
+    f"{APP_PREFIX}/api/v2/peer",
+    f"{APP_PREFIX}/api/v2/peers/usage",
+    f"{APP_PREFIX}/api/v2/peers",
+    f"{APP_PREFIX}/api/v2/peer/renew",
+    f"{APP_PREFIX}/api/v2/peer/limits",
+    f"{APP_PREFIX}/api/v2/peer/limits/add",
+    f"{APP_PREFIX}/api/v2/peers/bulk",
 }
 
 def is_bot_endpoint_allowed(path: str) -> bool:
@@ -464,6 +508,26 @@ def is_bot_endpoint_allowed(path: str) -> bool:
         if clean_path == clean_ep or clean_path.startswith(clean_ep + "/"):
             return True
     return False
+
+def extract_target_configuration() -> str | None:
+    parts = request.path.rstrip('/').split('/')
+    if len(parts) > 0 and parts[-1] in WireguardConfigurations:
+        return parts[-1]
+    for p in ('configurationName', 'configuration', 'configName'):
+        val = request.args.get(p)
+        if val:
+            return val
+    if request.is_json:
+        try:
+            body = request.get_json(silent=True)
+            if isinstance(body, dict):
+                for p in ('configurationName', 'configuration', 'configName', 'Configuration'):
+                    val = body.get(p)
+                    if val:
+                        return str(val)
+        except Exception:
+            pass
+    return None
 
 '''
 API Routes
@@ -521,12 +585,28 @@ def auth_req():
                 response.status_code = 401
                 return response
 
+            current_key = valid_keys[0]
+            g.api_key = current_key
+
             # Enforce bot allowlist (SEC-03)
             if not is_bot_endpoint_allowed(request.path):
                 DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"API Key endpoint not allowed: {request.path}")
                 g.api_accessed = False
                 return ResponseObject(False, "API key not authorized for this endpoint", status_code=403)
-            
+
+            # Scope permission check (FEAT-05)
+            if current_key.Scope == "read" and request.method.upper() not in ('GET', 'HEAD', 'OPTIONS'):
+                DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"API Key scope violation: write attempted with read-only scope")
+                g.api_accessed = False
+                return ResponseObject(False, "API key has read-only scope", status_code=403)
+
+            # Configuration permission check (BOT-14)
+            target_config = extract_target_configuration()
+            if target_config and not current_key.is_configuration_allowed(target_config):
+                DashboardLogger.log(str(request.url), str(request.remote_addr), Status="false", Message=f"API Key config scope violation: attempted {target_config}")
+                g.api_accessed = False
+                return ResponseObject(False, f"API key not authorized for configuration '{target_config}'", status_code=403)
+
             # For valid API keys: only log mutating actions (POST/PUT/DELETE/PATCH),
             # preventing millions of noisy log rows from continuous background GET polling.
             if request.method.upper() not in ('GET', 'HEAD', 'OPTIONS'):
@@ -1438,21 +1518,37 @@ def API_resetPeerData(configName):
     wgc = WireguardConfigurations.get(configName)
     with wgc.lock:
         foundPeer, peer = wgc.searchPeer(id)
+        is_restricted = False
+        if not foundPeer:
+            for r_peer in (wgc.RestrictedPeers or []):
+                if r_peer.id == id or r_peer.id == (id.strip().replace(' ', '+') if id else id):
+                    foundPeer, peer = True, r_peer
+                    is_restricted = True
+                    break
+        else:
+            for r_peer in (wgc.RestrictedPeers or []):
+                if r_peer.id == id or r_peer.id == (id.strip().replace(' ', '+') if id else id):
+                    is_restricted = True
+                    break
+
         if not foundPeer:
             return ResponseObject(False, "Configuration/Peer does not exist", status_code=404)
         
         resetStatus = peer.resetDataUsage(type)
         if resetStatus:
-            is_restricted = False
-            for r_peer in (wgc.RestrictedPeers or []):
-                if r_peer.id == id or r_peer.id == id.strip().replace(' ', '+'):
-                    is_restricted = True
-                    break
             if not is_restricted and wgc.getStatus():
                 wgc.restrictPeers([id], reason="Resetting data usage")
-                wgc.allowAccessPeers([id])
+                wgc.allowAccessPeers([id], force=True)
+            try:
+                wgc.DashboardWebHooks.RunWebHook("peer_usage_reset", {
+                    "configuration": configName,
+                    "peer_id": id,
+                    "type": type
+                })
+            except Exception as e:
+                _logger.error(f"Error triggering peer_usage_reset webhook: {e}")
         
-        return ResponseObject(status=resetStatus)
+        return ResponseObject(status=resetStatus, status_code=200 if resetStatus else 400)
 
 @app.post(f'{APP_PREFIX}/api/deletePeers/<configName>')
 def API_deletePeers(configName: str) -> ResponseObject:
@@ -1468,6 +1564,8 @@ def API_deletePeers(configName: str) -> ResponseObject:
     configuration = WireguardConfigurations.get(configName)
     with configuration.lock:
         status, msg = configuration.deletePeers(peers, AllPeerJobs, AllPeerShareLinks)
+        if not status:
+            return ResponseObject(False, msg, status_code=404 if "No peer(s) to delete found" in msg else 400)
         
         # Delete Assignment
         for p in peers:
@@ -1483,6 +1581,7 @@ def API_restrictPeers(configName: str) -> ResponseObject:
     if not isinstance(data, dict):
         return ResponseObject(False, "Invalid JSON body", status_code=400)
     peers = data.get('peers')
+    reason = data.get('reason')
     if not isinstance(peers, list) or len(peers) == 0:
         return ResponseObject(False, "Please specify one or more peers", status_code=400)
     if configName not in WireguardConfigurations.keys():
@@ -1490,8 +1589,8 @@ def API_restrictPeers(configName: str) -> ResponseObject:
 
     configuration = WireguardConfigurations.get(configName)
     with configuration.lock:
-        status, msg = configuration.restrictPeers(peers)
-        return ResponseObject(status, msg)
+        status, msg = configuration.restrictPeers(peers, reason=reason)
+        return ResponseObject(status, msg, status_code=200 if status else 400)
 
 @app.post(f'{APP_PREFIX}/api/sharePeer/create')
 def API_sharePeer_create():
@@ -1573,13 +1672,14 @@ def API_allowAccessPeers(configName: str) -> ResponseObject:
     if not isinstance(data, dict):
         return ResponseObject(False, "Invalid JSON body", status_code=400)
     peers = data.get('peers')
+    force = bool(data.get('force', False))
     if not isinstance(peers, list) or len(peers) == 0:
         return ResponseObject(False, "Please specify one or more peers", status_code=400)
     if configName in WireguardConfigurations.keys():
         configuration = WireguardConfigurations.get(configName)
         with configuration.lock:
-            status, msg = configuration.allowAccessPeers(peers)
-            return ResponseObject(status, msg)
+            status, msg = configuration.allowAccessPeers(peers, force=force)
+            return ResponseObject(status, msg, status_code=200 if status else 400)
     return ResponseObject(False, "Configuration does not exist", status_code=404)
 
 @app.post(f'{APP_PREFIX}/api/reconcileConfiguration/<configName>')
@@ -1794,10 +1894,11 @@ def API_getNumberOfAvailableIPs(configName):
 def API_getConfigurationInfo():
     configurationName = request.args.get("configurationName")
     if not configurationName or configurationName not in WireguardConfigurations.keys():
-        return ResponseObject(False, "Please provide configuration name")
+        return ResponseObject(False, "Please provide configuration name", status_code=400)
     config = WireguardConfigurations[configurationName]
-    restricted_peers = config.getRestrictedPeersList()
-    active_peers = config.Peers or []
+    restricted_peers = config.getRestrictedPeersList() or []
+    restricted_ids = {p.id for p in restricted_peers}
+    active_peers = [p for p in (config.Peers or []) if p.id not in restricted_ids and not getattr(p, 'restricted', False)]
     return ResponseObject(data={
         "configurationInfo": config.toJson(),
         "configurationPeers": active_peers,
@@ -1971,14 +2072,19 @@ def API_savePeerScheduleJob():
             return ResponseObject(False, "Job Value must be a valid number for data usage", status_code=400)
     elif field == "date":
         try:
-            datetime.strptime(str(val), "%Y-%m-%d %H:%M:%S")
+            _parse_job_datetime(str(val))
         except (ValueError, TypeError):
-            return ResponseObject(False, "Job Value must be a valid date in format YYYY-MM-DD HH:MM:SS", status_code=400)
+            return ResponseObject(False, "Job Value must be a valid date in format YYYY-MM-DD HH:MM:SS, ISO-8601, or epoch timestamp", status_code=400)
 
     configuration = WireguardConfigurations.get(job.get('Configuration'))
     if configuration is None:
         return ResponseObject(False, "Configuration does not exist", status_code=404)
     f, fp = configuration.searchPeer(job.get('Peer'))
+    if not f:
+        for rp in (configuration.RestrictedPeers or []):
+            if rp.id == job.get('Peer') or rp.id == (job.get('Peer').strip().replace(' ', '+') if job.get('Peer') else ''):
+                f, fp = True, rp
+                break
     if not f:
         return ResponseObject(False, "Peer does not exist", status_code=404)
     
@@ -2213,10 +2319,13 @@ def API_Welcome_Finish():
 
 class Locale:
     def __init__(self):
-        self.localePath = './static/locales/'
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.localePath = os.path.join(base_dir, 'static', 'locales')
         self.activeLanguages = {}
-        with open(os.path.join(f"{self.localePath}supported_locales.json"), "r", encoding="utf-8") as f:
-            self.activeLanguages = sorted(json.loads(''.join(f.readlines())), key=lambda x : x['lang_name'])
+        supported_path = os.path.join(self.localePath, "supported_locales.json")
+        if os.path.exists(supported_path):
+            with open(supported_path, "r", encoding="utf-8") as f:
+                self.activeLanguages = sorted(json.loads(''.join(f.readlines())), key=lambda x : x['lang_name'])
         
     def getLanguage(self) -> dict | None:
         currentLanguage = DashboardConfig.GetConfig("Server", "dashboard_language")[1]
@@ -2516,6 +2625,527 @@ def API_WebHooks_GetWebHookSessions():
     
     return ResponseObject(data=DashboardWebHooks.GetWebHookSessions(webHook))
     
+
+'''
+API v2 Routes (OxBot & Automation Integration)
+'''
+
+@app.get(f'{APP_PREFIX}/api/v2/peer')
+def API_v2_getPeer():
+    config_name = request.args.get('configurationName') or request.args.get('configuration')
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+    config = WireguardConfigurations[config_name]
+    
+    peer_id = request.args.get('id')
+    peer_name = request.args.get('name')
+    if not peer_id and not peer_name:
+        return ResponseObject(False, "Either 'id' (public key) or 'name' is required", status_code=400)
+    
+    found_peer = None
+    is_restricted = False
+    
+    # 1. Search by id
+    if peer_id:
+        p_clean = peer_id.strip().replace(' ', '+')
+        found, p = config.searchPeer(p_clean)
+        if found:
+            found_peer = p
+        else:
+            for rp in (config.RestrictedPeers or []):
+                if rp.id == p_clean or rp.id == peer_id:
+                    found_peer = rp
+                    is_restricted = True
+                    break
+
+    # 2. Fallback search by name
+    if not found_peer and peer_name:
+        for p in (config.Peers or []):
+            if p.name == peer_name:
+                found_peer = p
+                break
+        if not found_peer:
+            for rp in (config.RestrictedPeers or []):
+                if rp.name == peer_name:
+                    found_peer = rp
+                    is_restricted = True
+                    break
+
+    if not found_peer:
+        return ResponseObject(False, "Peer not found", status_code=404)
+
+    cumu_recv = float(getattr(found_peer, 'cumu_receive', 0.0) or 0.0)
+    cur_recv = float(getattr(found_peer, 'total_receive', 0.0) or 0.0)
+    cumu_sent = float(getattr(found_peer, 'cumu_sent', 0.0) or 0.0)
+    cur_sent = float(getattr(found_peer, 'total_sent', 0.0) or 0.0)
+    rx_gb = cumu_recv + cur_recv
+    tx_gb = cumu_sent + cur_sent
+    total_gb = rx_gb + tx_gb
+
+    jobs = [j.toJson() for j in AllPeerJobs.searchJob(config_name, found_peer.id)]
+    
+    share_links = AllPeerShareLinks.getLink(config_name, found_peer.id)
+    share_link = share_links[0] if share_links else None
+
+    return ResponseObject(True, data={
+        "id": found_peer.id,
+        "name": getattr(found_peer, 'name', '') or '',
+        "allowed_ip": getattr(found_peer, 'allowed_ip', '') or '',
+        "restricted": is_restricted or bool(getattr(found_peer, 'restricted', False)),
+        "restricted_reason": getattr(found_peer, 'restricted_reason', '') or '',
+        "status": getattr(found_peer, 'status', 'stopped' if is_restricted else 'running'),
+        "endpoint": getattr(found_peer, 'endpoint', '') or '',
+        "latest_handshake": getattr(found_peer, 'latest_handshake', '') or '',
+        "usage": {
+            "rx_gb": round(rx_gb, 4),
+            "tx_gb": round(tx_gb, 4),
+            "total_gb": round(total_gb, 4)
+        },
+        "jobs": jobs,
+        "share_link": share_link
+    })
+
+@app.get(f'{APP_PREFIX}/api/v2/peers/usage')
+def API_v2_getPeersUsage():
+    config_name = request.args.get('configurationName') or request.args.get('configuration')
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+    config = WireguardConfigurations[config_name]
+
+    restricted_dict = {rp.id: rp for rp in (config.getRestrictedPeersList() or [])}
+    active_peers = [p for p in (config.Peers or []) if p.id not in restricted_dict and not getattr(p, 'restricted', False)]
+
+    usage_list = []
+    for p in active_peers:
+        c_rx = float(getattr(p, 'cumu_receive', 0.0) or 0.0) + float(getattr(p, 'total_receive', 0.0) or 0.0)
+        c_tx = float(getattr(p, 'cumu_sent', 0.0) or 0.0) + float(getattr(p, 'total_sent', 0.0) or 0.0)
+        hs = getattr(p, 'latest_handshake', '') or ''
+        usage_list.append([
+            p.id,
+            getattr(p, 'name', '') or '',
+            False,
+            round(c_rx + c_tx, 4),
+            round(c_rx, 4),
+            round(c_tx, 4),
+            hs
+        ])
+
+    for r_id, rp in restricted_dict.items():
+        c_rx = float(getattr(rp, 'cumu_receive', 0.0) or 0.0) + float(getattr(rp, 'total_receive', 0.0) or 0.0)
+        c_tx = float(getattr(rp, 'cumu_sent', 0.0) or 0.0) + float(getattr(rp, 'total_sent', 0.0) or 0.0)
+        hs = getattr(rp, 'latest_handshake', '') or ''
+        usage_list.append([
+            r_id,
+            getattr(rp, 'name', '') or '',
+            True,
+            round(c_rx + c_tx, 4),
+            round(c_rx, 4),
+            round(c_tx, 4),
+            hs
+        ])
+
+    payload_str = json.dumps(usage_list, separators=(',', ':'))
+    etag = f'"{hashlib.md5(payload_str.encode("utf-8")).hexdigest()}"'
+    
+    if request.headers.get('If-None-Match') == etag:
+        res = Response("", status=304)
+        res.headers['ETag'] = etag
+        return res
+
+    resp = Response(
+        json.dumps({"status": True, "message": "Success", "data": usage_list}),
+        status=200,
+        mimetype="application/json"
+    )
+    resp.headers['ETag'] = etag
+    return resp
+
+@app.post(f'{APP_PREFIX}/api/v2/peers')
+def API_v2_createPeer():
+    idempotency_key = request.headers.get('Idempotency-Key')
+    if idempotency_key:
+        cached = _get_idempotent_response(idempotency_key)
+        if cached is not None:
+            return ResponseObject(True, "Success (idempotent replay)", data=cached)
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
+
+    config_name = data.get('configurationName') or data.get('configuration')
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+
+    name = data.get('name', '').strip()
+    if not name:
+        return ResponseObject(False, "Peer 'name' is required", status_code=400)
+
+    config = WireguardConfigurations[config_name]
+    with config.lock:
+        allowed_ips = data.get('allowed_ips')
+        if not allowed_ips:
+            ipStatus, availableIps = config.getAvailableIP(-1)
+            if not ipStatus or not availableIps:
+                return ResponseObject(False, "No available IP addresses in subnet", status_code=400)
+            allocated_ip = None
+            for subnet in availableIps.keys():
+                for ip in availableIps[subnet]:
+                    allocated_ip = ip
+                    break
+                if allocated_ip:
+                    break
+            if not allocated_ip:
+                return ResponseObject(False, "No available IP addresses in subnet", status_code=400)
+            allowed_ips = [allocated_ip]
+        elif isinstance(allowed_ips, str):
+            allowed_ips = [allowed_ips]
+
+        private_key = data.get('private_key', '')
+        public_key = data.get('public_key', '')
+        if not public_key:
+            if not private_key:
+                status, priv = GenerateWireguardPrivateKey()
+                private_key = priv
+                status, pub = GenerateWireguardPublicKey(private_key)
+                public_key = pub
+            else:
+                status, pub = GenerateWireguardPublicKey(private_key)
+                public_key = pub
+
+        dns = data.get('DNS', DashboardConfig.GetConfig("Peers", "peer_global_DNS")[1])
+        mtu = data.get('mtu', 0)
+        keepalive = data.get('keepalive', 0)
+        notes = data.get('notes', '')
+        preshared_key = data.get('preshared_key', '')
+        endpoint_allowed_ip = data.get('endpoint_allowed_ip', DashboardConfig.GetConfig("Peers", "peer_endpoint_allowed_ip")[1])
+
+        peer_dict = {
+            "name": name,
+            "id": public_key,
+            "private_key": private_key,
+            "allowed_ip": ','.join(allowed_ips),
+            "DNS": dns,
+            "endpoint_allowed_ip": endpoint_allowed_ip,
+            "mtu": mtu,
+            "keepalive": keepalive,
+            "notes": notes,
+            "preshared_key": preshared_key
+        }
+
+        status, added_peers, msg = config.addPeers([peer_dict])
+        if not status or not added_peers:
+            return ResponseObject(False, f"Failed to create peer: {msg}", status_code=400)
+
+        created_peer = added_peers[0]
+
+        limits = data.get('limits') or {}
+        jobs_created = []
+        if isinstance(limits, dict):
+            data_limit_gb = limits.get('data_limit_gb')
+            if data_limit_gb is not None:
+                try:
+                    val_num = float(data_limit_gb)
+                    if val_num > 0:
+                        job_id = str(uuid.uuid4())
+                        pj = PeerJob(
+                            job_id, config_name, public_key,
+                            "total_data", ">=", str(val_num),
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            None, "restrict"
+                        )
+                        s, res = AllPeerJobs.saveJob(pj)
+                        if s:
+                            jobs_created.append(pj.toJson())
+                except (ValueError, TypeError):
+                    pass
+
+            expire_at = limits.get('expire_at')
+            if expire_at:
+                try:
+                    _parse_job_datetime(str(expire_at))
+                    job_id = str(uuid.uuid4())
+                    pj = PeerJob(
+                        job_id, config_name, public_key,
+                        "date", ">=", str(expire_at),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        None, "restrict"
+                    )
+                    s, res = AllPeerJobs.saveJob(pj)
+                    if s:
+                        jobs_created.append(pj.toJson())
+                except (ValueError, TypeError):
+                    pass
+
+        dl = created_peer.downloadPeer()
+        config_file_text = dl.get('file', '')
+        qr_b64 = None
+        if HAS_QRCODE and config_file_text:
+            try:
+                qr = qrcode.QRCode(box_size=10, border=2)
+                qr.add_data(config_file_text)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                qr_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            except Exception as e:
+                app.logger.error(f"Error generating QR code: {e}")
+
+        result_data = {
+            "peer": created_peer.toJson(),
+            "config_file": config_file_text,
+            "qr_png_base64": qr_b64,
+            "jobs": jobs_created
+        }
+
+        if idempotency_key:
+            _store_idempotent_response(idempotency_key, result_data)
+
+        return ResponseObject(True, "Peer created successfully", data=result_data)
+
+@app.post(f'{APP_PREFIX}/api/v2/peer/renew')
+def API_v2_renewPeer():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
+
+    config_name = data.get('configurationName') or data.get('configuration')
+    peer_id = data.get('id')
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+    if not peer_id:
+        return ResponseObject(False, "Peer ID ('id') is required", status_code=400)
+
+    config = WireguardConfigurations[config_name]
+    with config.lock:
+        p_clean = peer_id.strip().replace(' ', '+')
+        found, peer = config.searchPeer(p_clean)
+        is_restricted = False
+        if not found:
+            for rp in (config.RestrictedPeers or []):
+                if rp.id == p_clean or rp.id == peer_id:
+                    found, peer = True, rp
+                    is_restricted = True
+                    break
+
+        if not found:
+            return ResponseObject(False, "Peer not found", status_code=404)
+
+        reset_usage = data.get('reset_usage', True)
+        if reset_usage:
+            peer.resetDataUsage("total")
+            try:
+                config.DashboardWebHooks.RunWebHook("peer_usage_reset", {
+                    "configuration": config_name,
+                    "peer_id": peer.id,
+                    "type": "total"
+                })
+            except Exception:
+                pass
+
+        existing_jobs = AllPeerJobs.searchJob(config_name, peer.id)
+        for ej in existing_jobs:
+            if ej.Field in ("total_data", "total_receive", "total_sent", "date"):
+                AllPeerJobs.deleteJob(ej)
+
+        data_limit_gb = data.get('data_limit_gb')
+        if data_limit_gb is not None:
+            try:
+                val_num = float(data_limit_gb)
+                if val_num > 0:
+                    pj = PeerJob(
+                        str(uuid.uuid4()), config_name, peer.id,
+                        "total_data", ">=", str(val_num),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        None, "restrict"
+                    )
+                    AllPeerJobs.saveJob(pj)
+            except (ValueError, TypeError):
+                pass
+
+        expire_at = data.get('expire_at')
+        if expire_at:
+            try:
+                _parse_job_datetime(str(expire_at))
+                pj = PeerJob(
+                    str(uuid.uuid4()), config_name, peer.id,
+                    "date", ">=", str(expire_at),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    None, "restrict"
+                )
+                AllPeerJobs.saveJob(pj)
+            except (ValueError, TypeError):
+                pass
+
+        if is_restricted:
+            config.allowAccessPeers([peer.id], force=True)
+
+        return ResponseObject(True, "Peer renewed successfully")
+
+@app.post(f'{APP_PREFIX}/api/v2/peer/limits')
+@app.post(f'{APP_PREFIX}/api/v2/peer/limits/add')
+def API_v2_peerLimits():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
+
+    config_name = data.get('configurationName') or data.get('configuration')
+    peer_id = data.get('id')
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+    if not peer_id:
+        return ResponseObject(False, "Peer ID ('id') is required", status_code=400)
+
+    config = WireguardConfigurations[config_name]
+    with config.lock:
+        p_clean = peer_id.strip().replace(' ', '+')
+        found, peer = config.searchPeer(p_clean)
+        is_restricted = False
+        if not found:
+            for rp in (config.RestrictedPeers or []):
+                if rp.id == p_clean or rp.id == peer_id:
+                    found, peer = True, rp
+                    is_restricted = True
+                    break
+
+        if not found:
+            return ResponseObject(False, "Peer not found", status_code=404)
+
+        current_usage = float(getattr(peer, 'cumu_data', 0.0) or 0.0) + float(getattr(peer, 'total_data', 0.0) or 0.0)
+        existing_jobs = AllPeerJobs.searchJob(config_name, peer.id)
+        existing_vol_job = next((j for j in existing_jobs if j.Field == "total_data"), None)
+        existing_date_job = next((j for j in existing_jobs if j.Field == "date"), None)
+
+        unrestrict_needed = False
+
+        add_data_gb = data.get('add_data_gb')
+        if add_data_gb is not None:
+            try:
+                add_vol = float(add_data_gb)
+                if add_vol > 0:
+                    base_limit = float(existing_vol_job.Value) if existing_vol_job else current_usage
+                    new_limit = max(base_limit, current_usage) + add_vol
+                    if existing_vol_job:
+                        AllPeerJobs.deleteJob(existing_vol_job)
+                    pj = PeerJob(
+                        str(uuid.uuid4()), config_name, peer.id,
+                        "total_data", ">=", str(round(new_limit, 4)),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        None, "restrict"
+                    )
+                    AllPeerJobs.saveJob(pj)
+                    if is_restricted and getattr(peer, 'restricted_reason', '') == "Volume Limit Reached":
+                        unrestrict_needed = True
+            except (ValueError, TypeError):
+                pass
+
+        data_limit_gb = data.get('data_limit_gb')
+        if data_limit_gb is not None:
+            try:
+                set_limit = float(data_limit_gb)
+                if set_limit > 0:
+                    if existing_vol_job:
+                        AllPeerJobs.deleteJob(existing_vol_job)
+                    pj = PeerJob(
+                        str(uuid.uuid4()), config_name, peer.id,
+                        "total_data", ">=", str(round(set_limit, 4)),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        None, "restrict"
+                    )
+                    AllPeerJobs.saveJob(pj)
+                    if set_limit > current_usage and is_restricted and getattr(peer, 'restricted_reason', '') == "Volume Limit Reached":
+                        unrestrict_needed = True
+            except (ValueError, TypeError):
+                pass
+
+        add_days = data.get('add_days')
+        if add_days is not None:
+            try:
+                days_num = float(add_days)
+                if days_num > 0:
+                    base_dt = datetime.now(timezone.utc)
+                    if existing_date_job:
+                        try:
+                            edt, _ = _parse_job_datetime(existing_date_job.Value)
+                            if edt > base_dt:
+                                base_dt = edt
+                        except Exception:
+                            pass
+                    new_dt = base_dt + timedelta(days=days_num)
+                    new_dt_str = new_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    if existing_date_job:
+                        AllPeerJobs.deleteJob(existing_date_job)
+                    pj = PeerJob(
+                        str(uuid.uuid4()), config_name, peer.id,
+                        "date", ">=", new_dt_str,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        None, "restrict"
+                    )
+                    AllPeerJobs.saveJob(pj)
+                    if is_restricted and getattr(peer, 'restricted_reason', '') == "Time Limit Reached":
+                        unrestrict_needed = True
+            except (ValueError, TypeError):
+                pass
+
+        expire_at = data.get('expire_at')
+        if expire_at:
+            try:
+                _parse_job_datetime(str(expire_at))
+                if existing_date_job:
+                    AllPeerJobs.deleteJob(existing_date_job)
+                pj = PeerJob(
+                    str(uuid.uuid4()), config_name, peer.id,
+                    "date", ">=", str(expire_at),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    None, "restrict"
+                )
+                AllPeerJobs.saveJob(pj)
+                if is_restricted and getattr(peer, 'restricted_reason', '') == "Time Limit Reached":
+                    unrestrict_needed = True
+            except (ValueError, TypeError):
+                pass
+
+        if unrestrict_needed:
+            config.allowAccessPeers([peer.id], force=True)
+
+        return ResponseObject(True, "Limits updated successfully")
+
+@app.post(f'{APP_PREFIX}/api/v2/peers/bulk')
+def API_v2_peersBulk():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
+
+    config_name = data.get('configurationName') or data.get('configuration')
+    action = data.get('action')
+    ids = data.get('ids')
+
+    if not config_name or config_name not in WireguardConfigurations:
+        return ResponseObject(False, "Valid configurationName is required", status_code=400)
+    if not action or action not in ('restrict', 'allow', 'delete'):
+        return ResponseObject(False, "Valid 'action' (restrict, allow, delete) is required", status_code=400)
+    if not isinstance(ids, list) or len(ids) == 0:
+        return ResponseObject(False, "List of peer 'ids' is required", status_code=400)
+
+    config = WireguardConfigurations[config_name]
+    with config.lock:
+        if action == 'restrict':
+            reason = data.get('reason')
+            status, msg = config.restrictPeers(ids, reason=reason)
+            return ResponseObject(status, msg, status_code=200 if status else 400)
+        elif action == 'allow':
+            force = bool(data.get('force', False))
+            status, msg = config.allowAccessPeers(ids, force=force)
+            return ResponseObject(status, msg, status_code=200 if status else 400)
+        elif action == 'delete':
+            status, msg = config.deletePeers(ids, AllPeerJobs, AllPeerShareLinks)
+            if not status:
+                return ResponseObject(False, msg, status_code=404 if "No peer(s) to delete found" in msg else 400)
+            for p in ids:
+                assignments = DashboardClients.DashboardClientsPeerAssignment.GetAssignedClients(config_name, p)
+                for c in assignments:
+                    DashboardClients.DashboardClientsPeerAssignment.UnassignClients(c.AssignmentID)
+            return ResponseObject(status, msg)
 
 '''
 Index Page

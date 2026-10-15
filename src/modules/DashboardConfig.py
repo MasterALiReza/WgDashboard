@@ -195,15 +195,33 @@ class DashboardConfig:
                                               ),
                                     db.Column("ExpiredAt",
                                               (db.DATETIME if self.GetConfig('Database', 'type')[1] == 'sqlite' else db.TIMESTAMP)
-                                              )
+                                              ),
+                                    db.Column("AllowedConfigurations", db.String(255), server_default="*"),
+                                    db.Column("Scope", db.String(50), server_default="admin"),
+                                    db.Column("Label", db.String(255), server_default=""),
+                                    extend_existing=True
                                     )
         self.dbMetadata.create_all(self.engine)
+        try:
+            inspector = db.inspect(self.engine)
+            if inspector.has_table('DashboardAPIKeys'):
+                existing_cols = [c['name'] for c in inspector.get_columns('DashboardAPIKeys')]
+                with self.engine.begin() as conn:
+                    if 'AllowedConfigurations' not in existing_cols:
+                        conn.execute(db.text("ALTER TABLE DashboardAPIKeys ADD COLUMN AllowedConfigurations VARCHAR(255) DEFAULT '*'"))
+                    if 'Scope' not in existing_cols:
+                        conn.execute(db.text("ALTER TABLE DashboardAPIKeys ADD COLUMN Scope VARCHAR(50) DEFAULT 'admin'"))
+                    if 'Label' not in existing_cols:
+                        conn.execute(db.text("ALTER TABLE DashboardAPIKeys ADD COLUMN Label VARCHAR(255) DEFAULT ''"))
+        except Exception:
+            pass
+
     def __getAPIKeys(self) -> list[DashboardAPIKey]:
         try:
             with self.engine.connect() as conn:
                 keys = conn.execute(self.apiKeyTable.select().where(
                     db.or_(self.apiKeyTable.columns.ExpiredAt.is_(None), self.apiKeyTable.columns.ExpiredAt > datetime.now())
-                )).fetchall()
+                )).mappings().fetchall()
                 fKeys = []
                 def _fmt_dt(val):
                     if val is None:
@@ -213,7 +231,14 @@ class DashboardConfig:
                     return str(val)
 
                 for k in keys:
-                    fKeys.append(DashboardAPIKey(k[0], _fmt_dt(k[1]), _fmt_dt(k[2])))
+                    fKeys.append(DashboardAPIKey(
+                        Key=k.get('Key'),
+                        CreatedAt=_fmt_dt(k.get('CreatedAt')),
+                        ExpiredAt=_fmt_dt(k.get('ExpiredAt')),
+                        AllowedConfigurations=k.get('AllowedConfigurations') or "*",
+                        Scope=k.get('Scope') or "admin",
+                        Label=k.get('Label') or ""
+                    ))
                 return fKeys
         except Exception as e:
             try:
@@ -226,17 +251,21 @@ class DashboardConfig:
                 pass
         return []
 
-    def createAPIKeys(self, ExpiredAt = None):
+    def createAPIKeys(self, ExpiredAt = None, AllowedConfigurations = "*", Scope = "admin", Label = ""):
         newKey = secrets.token_urlsafe(32)
         with self.engine.begin() as conn:
             conn.execute(
                 self.apiKeyTable.insert().values({
                     "Key": newKey,
-                    "ExpiredAt": ExpiredAt
+                    "ExpiredAt": ExpiredAt,
+                    "AllowedConfigurations": AllowedConfigurations or "*",
+                    "Scope": Scope or "admin",
+                    "Label": Label or ""
                 })
             )
 
         self.DashboardAPIKeys = self.__getAPIKeys()
+        return newKey
 
     def deleteAPIKey(self, key):
         with self.engine.begin() as conn:

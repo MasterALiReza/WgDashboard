@@ -12,7 +12,10 @@ from flask import current_app
 
 from concurrent.futures import ThreadPoolExecutor
 
-WebHookActions = ['peer_created', 'peer_deleted', 'peer_updated']
+WebHookActions = [
+    'peer_created', 'peer_deleted', 'peer_updated',
+    'peer_restricted', 'peer_allowed', 'peer_usage_reset'
+]
 class WebHook(BaseModel):
     WebHookID: str = ''
     PayloadURL: str = ''
@@ -275,6 +278,16 @@ class WebHookSession:
                     if type(self.data[key]) not in [str, int]:
                         self.data[key] = json.dumps(self.data[key])
                 reqData = urllib.parse.urlencode(self.data)
+
+            # Security: attach timestamp and HMAC signature if secret header or property is provided
+            ts = str(int(time.time()))
+            headerDictionary['X-WGD-Timestamp'] = ts
+            secret = headerDictionary.pop('X-WGD-Secret', None) or getattr(self.webHook, 'Secret', None)
+            if secret:
+                import hmac, hashlib
+                sig = hmac.new(secret.encode('utf-8'), f"{ts}.{reqData}".encode('utf-8'), hashlib.sha256).hexdigest()
+                headerDictionary['X-WGD-Signature'] = f"sha256={sig}"
+
             try:
                 req = requests.post(
                     self.webHook.PayloadURL, headers=headerDictionary, timeout=10, data=reqData, verify=self.webHook.VerifySSL

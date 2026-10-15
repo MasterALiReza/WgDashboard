@@ -47,7 +47,6 @@ class AmneziaConfiguration(WireguardConfiguration):
         return {
             "Status": self.Status,
             "Name": self.Name,
-            "PrivateKey": self.PrivateKey,
             "PublicKey": self.PublicKey,
             "Address": self.Address,
             "ListenPort": self.ListenPort,

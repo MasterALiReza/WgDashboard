@@ -54,6 +54,21 @@ coverage
 *.tsbuildinfo
 .vite/*
 
+# Sensitive runtime artifacts (backups, DB files, peer configs, keys)
+GlobalBackups/
+src/GlobalBackups/
+src/download/
+src/attachments/
+src/plugins/
+db/
+*.sqlite3
+*.zip
+!src/static/dist/**/*.zip
+*.bundle
+*.pem
+*.key
+_PRIVATE*/
+
 # Test and Agents
 .agents/
 scratch/

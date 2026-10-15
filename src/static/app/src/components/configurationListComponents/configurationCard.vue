@@ -11,8 +11,7 @@ export default {
 		c: {
 			Name: String,
 			Status: Boolean,
-			PublicKey: String,
-			PrivateKey: String
+			PublicKey: String
 		},
 		delay: String,
 		display: String
@@ -97,7 +96,7 @@ export default {
 						</small>
 					</div>
 					<div class="form-check form-switch ms-auto">
-						<label class="form-check-label" style="cursor: pointer" :for="'switch' + c.PrivateKey">
+						<label class="form-check-label" style="cursor: pointer" :for="'switch_' + c.Name">
 							<LocaleText t="Turning Off..." v-if="!c.Status && this.configurationToggling"></LocaleText>
 							<LocaleText t="Turning On..." v-else-if="c.Status && this.configurationToggling"></LocaleText>
 							<LocaleText t="On" v-else-if="c.Status && !this.configurationToggling"></LocaleText>
@@ -110,7 +109,7 @@ export default {
 						<input class="form-check-input"
 						       style="cursor: pointer"
 						       :disabled="this.configurationToggling"
-						       type="checkbox" role="switch" :id="'switch' + c.PrivateKey"
+						       type="checkbox" role="switch" :id="'switch_' + c.Name"
 						       @change="this.toggle()"
 						       v-model="c.Status"
 						>

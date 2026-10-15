@@ -308,5 +308,17 @@ class TestSecurityAudit:
         assert is_key_valid(valid_key) is True
         assert is_key_valid(never_expire_key) is True
 
+    def test_process_lock_safe_path(self):
+        from modules.Utilities import get_lock_file_path, ProcessLock
+        lock_path = get_lock_file_path("test_iface")
+        assert lock_path.endswith("wgdashboard_test_iface.lock")
+        assert os.path.dirname(lock_path) != ""
+
+        lock = ProcessLock(lock_path)
+        with lock:
+            assert lock._owner is not None
+        assert lock._owner is None
+
+
 
 

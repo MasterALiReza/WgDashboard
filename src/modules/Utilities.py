@@ -208,7 +208,12 @@ class ProcessLock:
         if fcntl:
             try:
                 os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
-                self.lock_fd = open(self.lock_file, "a+")
+                flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    fd = os.open(self.lock_file, flags, 0o600)
+                    self.lock_fd = os.fdopen(fd, "a+")
+                except Exception:
+                    self.lock_fd = open(self.lock_file, "a+")
                 # Attempt non-blocking flock in a loop with timeout
                 start_time = time.time()
                 while True:
@@ -274,6 +279,23 @@ def write_psk_tmp(psk: str) -> str:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(psk)
     return path
+
+
+def get_lock_file_path(name: str) -> str:
+    """Returns a safe path for process lock files in /run/wgdashboard/ with 0700 permissions (SEC-10)."""
+    if os.path.exists("/run") and os.path.isdir("/run"):
+        lock_dir = "/run/wgdashboard"
+    else:
+        lock_dir = os.path.join(tempfile.gettempdir(), "wgdashboard_locks")
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+        try:
+            os.chmod(lock_dir, 0o700)
+        except Exception:
+            pass
+    except Exception:
+        lock_dir = tempfile.gettempdir()
+    return os.path.join(lock_dir, f"wgdashboard_{name}.lock")
 
 
 class SimpleRateLimiter:

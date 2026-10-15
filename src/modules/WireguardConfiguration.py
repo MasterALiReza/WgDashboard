@@ -39,7 +39,8 @@ from .Utilities import StringToBoolean, \
     CheckAddress, \
     CheckPeerKey, \
     ProcessLock, \
-    write_psk_tmp
+    write_psk_tmp, \
+    get_lock_file_path
 from .WireguardConfigurationInfo import WireguardConfigurationInfo, PeerGroupsClass
 from .DashboardWebHooks import DashboardWebHooks
 
@@ -109,7 +110,7 @@ class WireguardConfiguration:
             self.Name = data["ConfigurationName"]
             self.configPath = os.path.join(self.__getProtocolPath(), f'{self.Name}.conf')
         
-        self.lock = ProcessLock(f"/tmp/wgdashboard_{self.Name}.lock")
+        self.lock = ProcessLock(get_lock_file_path(self.Name))
 
         if name is None:
             for i in dir(self):

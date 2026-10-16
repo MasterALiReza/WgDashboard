@@ -133,6 +133,32 @@ def handle_lock_timeout_error(e):
         status_code=503
     )
 
+@app.errorhandler(400)
+def handle_bad_request(e):
+    if request.path.startswith('/api/') or (APP_PREFIX and request.path.startswith(f"{APP_PREFIX}/api/")):
+        msg = e.description if hasattr(e, 'description') and e.description else "Bad Request"
+        return ResponseObject(False, f"Bad Request: {msg}", status_code=400)
+    return e
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    if request.path.startswith('/api/') or (APP_PREFIX and request.path.startswith(f"{APP_PREFIX}/api/")):
+        return ResponseObject(False, "API resource not found", status_code=404)
+    return e
+
+@app.errorhandler(405)
+def handle_method_not_allowed(e):
+    if request.path.startswith('/api/') or (APP_PREFIX and request.path.startswith(f"{APP_PREFIX}/api/")):
+        return ResponseObject(False, "Method Not Allowed", status_code=405)
+    return e
+
+@app.errorhandler(500)
+def handle_internal_server_error(e):
+    if request.path.startswith('/api/') or (APP_PREFIX and request.path.startswith(f"{APP_PREFIX}/api/")):
+        app.logger.error(f"Internal Server Error on {request.path}: {e}")
+        return ResponseObject(False, "Internal server error occurred. Please check server logs.", status_code=500)
+    return e
+
 def peerInformationBackgroundThread():
     global WireguardConfigurations
     app.logger.info("Background Thread #1 Started")
@@ -721,7 +747,9 @@ def API_AuthenticateLogin():
         DashboardLogger.log(str(request.url), str(request.remote_addr), Message=f"Login rate limited for IP: {ip}")
         return ResponseObject(False, "Too many login attempts. Please try again in a minute.", status_code=429)
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if not DashboardConfig.GetConfig("Server", "auth_req")[1]:
         return ResponseObject(True, DashboardConfig.GetConfig("Other", "welcome_session")[1])
 
@@ -795,7 +823,9 @@ def API_NewConfigurationTemplates_CreateTemplate():
 
 @app.post(f'{APP_PREFIX}/api/newConfigurationTemplates/updateTemplate')
 def API_NewConfigurationTemplates_UpdateTemplate():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     template = data.get('Template', None)
     if not template:
         return ResponseObject(False, "Please provide template")
@@ -805,7 +835,9 @@ def API_NewConfigurationTemplates_UpdateTemplate():
 
 @app.post(f'{APP_PREFIX}/api/newConfigurationTemplates/deleteTemplate')
 def API_NewConfigurationTemplates_DeleteTemplate():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     template = data.get('Template', None)
     if not template:
         return ResponseObject(False, "Please provide template")
@@ -815,13 +847,15 @@ def API_NewConfigurationTemplates_DeleteTemplate():
 
 @app.post(f'{APP_PREFIX}/api/addWireguardConfiguration')
 def API_addWireguardConfiguration():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     requiredKeys = [
         "ConfigurationName", "Address", "ListenPort", "PrivateKey", "Protocol"
     ]
     for i in requiredKeys:
         if i not in data.keys():
-            return ResponseObject(False, "Please provide all required parameters.")
+            return ResponseObject(False, "Please provide all required parameters.", status_code=400)
     
     if data.get("Protocol") not in ProtocolsEnabled():
         return ResponseObject(False, "Please provide a valid protocol: wg / awg.")
@@ -888,11 +922,13 @@ def API_toggleWireguardConfiguration():
 
 @app.post(f'{APP_PREFIX}/api/updateWireguardConfiguration')
 def API_updateWireguardConfiguration():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     requiredKeys = ["Name"]
     for i in requiredKeys:
         if i not in data.keys():
-            return ResponseObject(False, "Please provide these following field: " + ", ".join(requiredKeys))
+            return ResponseObject(False, "Please provide these following field: " + ", ".join(requiredKeys), status_code=400)
     name = data.get("Name")
     if name not in WireguardConfigurations.keys():
         return ResponseObject(False, "Configuration does not exist", status_code=404)
@@ -903,12 +939,14 @@ def API_updateWireguardConfiguration():
 
 @app.post(f'{APP_PREFIX}/api/updateWireguardConfigurationInfo')
 def API_updateWireguardConfigurationInfo():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     name = data.get('Name')
     key = data.get('Key')
     value = data.get('Value')
     if not all([data, key, name]):
-        return ResponseObject(status=False, message="Please provide configuration name, key and value")
+        return ResponseObject(status=False, message="Please provide configuration name, key and value", status_code=400)
     if name not in WireguardConfigurations.keys():
         return ResponseObject(False, "Configuration does not exist", status_code=404)
     
@@ -930,14 +968,16 @@ def API_GetWireguardConfigurationRawFile():
 
 @app.post(f'{APP_PREFIX}/api/updateWireguardConfigurationRawFile')
 def API_UpdateWireguardConfigurationRawFile():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     configurationName = data.get('configurationName')
     rawConfiguration = data.get('rawConfiguration')
     if configurationName is None or len(
             configurationName) == 0 or configurationName not in WireguardConfigurations.keys():
-        return ResponseObject(False, "Please provide a valid configuration name")
+        return ResponseObject(False, "Please provide a valid configuration name", status_code=404)
     if rawConfiguration is None or len(rawConfiguration) == 0:
-        return ResponseObject(False, "Please provide content")
+        return ResponseObject(False, "Please provide content", status_code=400)
     
     status, err = WireguardConfigurations[configurationName].updateRawConfigurationFile(rawConfiguration)
 
@@ -945,7 +985,9 @@ def API_UpdateWireguardConfigurationRawFile():
 
 @app.post(f'{APP_PREFIX}/api/deleteWireguardConfiguration')
 def API_deleteWireguardConfiguration():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if "ConfigurationName" not in data.keys() or data.get("ConfigurationName") is None or data.get("ConfigurationName") not in WireguardConfigurations.keys():
         return ResponseObject(False, "Please provide the configuration name you want to delete", status_code=404)
     rp =  WireguardConfigurations.pop(data.get("ConfigurationName"))
@@ -957,7 +999,9 @@ def API_deleteWireguardConfiguration():
 
 @app.post(f'{APP_PREFIX}/api/renameWireguardConfiguration')
 def API_renameWireguardConfiguration():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     keys = ["ConfigurationName", "NewConfigurationName"]
     for k in keys:
         if (k not in data.keys() or data.get(k) is None or len(data.get(k)) == 0 or 
@@ -1053,7 +1097,9 @@ def API_createWireguardConfigurationBackup():
 
 @app.post(f'{APP_PREFIX}/api/deleteWireguardConfigurationBackup')
 def API_deleteWireguardConfigurationBackup():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if ("ConfigurationName" not in data.keys() or 
             "BackupFileName" not in data.keys() or
             len(data['ConfigurationName']) == 0 or 
@@ -1087,7 +1133,9 @@ def API_downloadWireguardConfigurationBackup():
 
 @app.post(f'{APP_PREFIX}/api/restoreWireguardConfigurationBackup')
 def API_restoreWireguardConfigurationBackup():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if ("ConfigurationName" not in data.keys() or
             "BackupFileName" not in data.keys() or
             len(data['ConfigurationName']) == 0 or
@@ -1453,13 +1501,15 @@ def API_getGlobalBackupSettings():
 
 @app.post(f'{APP_PREFIX}/api/updateDashboardConfigurationItem')
 def API_updateDashboardConfigurationItem():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if "section" not in data.keys() or "key" not in data.keys() or "value" not in data.keys():
-        return ResponseObject(False, "Invalid request.")
+        return ResponseObject(False, "Invalid request.", status_code=400)
     valid, msg = DashboardConfig.SetConfig(
         data["section"], data["key"], data['value'])
     if not valid:
-        return ResponseObject(False, msg)
+        return ResponseObject(False, msg, status_code=400)
     if data['section'] == "Server":
         if data['key'] == 'wg_conf_path':
             with WireguardConfigurationsLock:
@@ -1477,25 +1527,33 @@ def API_getDashboardAPIKeys():
 
 @app.post(f'{APP_PREFIX}/api/newDashboardAPIKey')
 def API_newDashboardAPIKey():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if DashboardConfig.GetConfig('Server', 'dashboard_api_key')[1]:
         try:
-            if data['NeverExpire']:
+            if data.get('NeverExpire'):
                 expiredAt = None
             else:
-                expiredAt = datetime.strptime(data['ExpiredAt'], '%Y-%m-%d %H:%M:%S')
+                expired_str = data.get('ExpiredAt')
+                if not expired_str:
+                    return ResponseObject(False, "ExpiredAt is required when NeverExpire is false", status_code=400)
+                expiredAt = datetime.strptime(expired_str, '%Y-%m-%d %H:%M:%S')
             DashboardConfig.createAPIKeys(expiredAt)
             return ResponseObject(True, data=DashboardConfig.DashboardAPIKeys)
         except Exception as e:
-            return ResponseObject(False, str(e))
+            return ResponseObject(False, str(e), status_code=400)
     return ResponseObject(False, "Dashboard API Keys function is disabled")
 
 @app.post(f'{APP_PREFIX}/api/deleteDashboardAPIKey')
 def API_deleteDashboardAPIKey():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if DashboardConfig.GetConfig('Server', 'dashboard_api_key')[1]:
-        if len(data['Key']) > 0 and len(list(filter(lambda x : x.Key == data['Key'], DashboardConfig.DashboardAPIKeys))) > 0:
-            DashboardConfig.deleteAPIKey(data['Key'])
+        key = data.get('Key', '')
+        if len(key) > 0 and len(list(filter(lambda x : x.Key == key, DashboardConfig.DashboardAPIKeys))) > 0:
+            DashboardConfig.deleteAPIKey(key)
             return ResponseObject(True, data=DashboardConfig.DashboardAPIKeys)
         else:
             return ResponseObject(False, "API Key does not exist", status_code=404)
@@ -1734,7 +1792,9 @@ def API_reconcileConfiguration(configName: str) -> ResponseObject:
 @app.post(f'{APP_PREFIX}/api/addPeers/<configName>')
 def API_addPeers(configName):
     if configName in WireguardConfigurations.keys():
-        data: dict = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         try:
             
 
@@ -2077,13 +2137,15 @@ def API_DownloadPeerTackingTable():
 
 @app.post(f'{APP_PREFIX}/api/deletePeerTrackingTable')
 def API_DeletePeerTrackingTable():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     configurationName = data.get('configurationName')
     table = data.get('table')
     if not configurationName or configurationName not in WireguardConfigurations.keys():
-        return ResponseObject(False, "Configuration does not exist")
+        return ResponseObject(False, "Configuration does not exist", status_code=404)
     if not table or table not in ['TrafficTrackingTable', 'HistoricalTrackingTable']:
-        return ResponseObject(False, "Table does not exist")
+        return ResponseObject(False, "Table does not exist", status_code=400)
     c = WireguardConfigurations.get(configurationName)
     return ResponseObject(
         status=c.deleteTransferTable() if table == 'TrafficTrackingTable'
@@ -2161,22 +2223,19 @@ def API_savePeerScheduleJob():
 
 @app.post(f'{APP_PREFIX}/api/deletePeerScheduleJob')
 def API_deletePeerScheduleJob():
-    data = request.json
-    if "Job" not in data.keys():
-        return ResponseObject(False, "Please specify job")
-    job: dict = data['Job']
-    if "Peer" not in job.keys() or "Configuration" not in job.keys():
-        return ResponseObject(False, "Please specify peer and configuration")
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or "Job" not in data:
+        return ResponseObject(False, "Please specify job", status_code=400)
+    job = data.get('Job')
+    if not isinstance(job, dict) or "Peer" not in job or "Configuration" not in job:
+        return ResponseObject(False, "Please specify peer and configuration", status_code=400)
     configuration = WireguardConfigurations.get(job['Configuration'])
     if configuration is None:
-        return ResponseObject(False, "Configuration does not exist")
-    # f, fp = configuration.searchPeer(job['Peer'])
-    # if not f:
-    #     return ResponseObject(False, "Peer does not exist")
+        return ResponseObject(False, "Configuration does not exist", status_code=404)
 
     s, p = AllPeerJobs.deleteJob(PeerJob(
-        job['JobID'], job['Configuration'], job['Peer'], job['Field'], job['Operator'], job['Value'],
-        job['CreationDate'], job['ExpireDate'], job['Action']))
+        job.get('JobID'), job.get('Configuration'), job.get('Peer'), job.get('Field'), job.get('Operator'), job.get('Value'),
+        job.get('CreationDate'), job.get('ExpireDate'), job.get('Action')))
     if s:
         return ResponseObject(s)
     return ResponseObject(s, message=p)
@@ -2337,7 +2396,9 @@ def API_Welcome_GetTotpLink():
 
 @app.post(f'{APP_PREFIX}/api/Welcome_VerifyTotpLink')
 def API_Welcome_VerifyTotpLink():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     totp_key = DashboardConfig.GetConfig("Account", "totp_key")[1]
     totp_code = str(data.get('totp') or '').strip()
     is_valid = False
@@ -2352,29 +2413,31 @@ def API_Welcome_VerifyTotpLink():
 
 @app.post(f'{APP_PREFIX}/api/Welcome_Finish')
 def API_Welcome_Finish():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     is_welcome = DashboardConfig.GetConfig("Other", "welcome_session")[1] is True or str(DashboardConfig.GetConfig("Other", "welcome_session")[1]).strip().lower() == 'true'
     if is_welcome:
-        if data["username"] == "":
-            return ResponseObject(False, "Username cannot be blank.")
+        if data.get("username", "") == "":
+            return ResponseObject(False, "Username cannot be blank.", status_code=400)
 
-        if data["newPassword"] == "" or len(data["newPassword"]) < 8:
-            return ResponseObject(False, "Password must be at least 8 characters")
+        if data.get("newPassword", "") == "" or len(str(data.get("newPassword", ""))) < 8:
+            return ResponseObject(False, "Password must be at least 8 characters", status_code=400)
 
         updateUsername, updateUsernameErr = DashboardConfig.SetConfig("Account", "username", data["username"])
         updatePassword, updatePasswordErr = DashboardConfig.SetConfig("Account", "password",
                                                                       {
                                                                           "newPassword": data["newPassword"],
-                                                                          "repeatNewPassword": data["repeatNewPassword"],
+                                                                          "repeatNewPassword": data.get("repeatNewPassword", ""),
                                                                           "currentPassword": "admin"
                                                                       })
         if not updateUsername or not updatePassword:
-            return ResponseObject(False, f"{updateUsernameErr},{updatePasswordErr}".strip(","))
+            return ResponseObject(False, f"{updateUsernameErr},{updatePasswordErr}".strip(","), status_code=400)
 
         DashboardConfig.SetConfig("Other", "welcome_session", False)
         return ResponseObject()
     else:
-        return ResponseObject(False, "Welcome session is not active.")
+        return ResponseObject(False, "Welcome session is not active.", status_code=400)
 
 class Locale:
     def __init__(self):
@@ -2416,9 +2479,11 @@ def API_Locale_Available():
         
 @app.post(f'{APP_PREFIX}/api/locale/update')
 def API_Locale_Update():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if 'lang_id' not in data.keys():
-        return ResponseObject(False, "Please specify a lang_id")
+        return ResponseObject(False, "Please specify a lang_id", status_code=400)
     Locale.updateLanguage(data['lang_id'])
     return ResponseObject(data=Locale.getLanguage())
 
@@ -2428,9 +2493,11 @@ def API_Email_Ready():
 
 @app.post(f'{APP_PREFIX}/api/email/send')
 def API_Email_Send():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     if "Receiver" not in data.keys() or "Subject" not in data.keys():
-        return ResponseObject(False, "Please at least specify receiver and subject")
+        return ResponseObject(False, "Please at least specify receiver and subject", status_code=400)
     body = str(data.get('Body') or '')
     subject = str(data.get('Subject') or '')
     download = None
@@ -2450,7 +2517,7 @@ def API_Email_Send():
                             body = template.render(peer=p.toJson(), configurationFile=download)
                             subject = _jinja_env.from_string(subject).render(peer=p.toJson(), configurationFile=download)
                         except Exception as e:
-                            return ResponseObject(False, f"Template rendering failed: {str(e)}")
+                            return ResponseObject(False, f"Template rendering failed: {str(e)}", status_code=400)
 
                         if data.get('IncludeAttachment', False):
                             u = str(uuid4())
@@ -2472,13 +2539,15 @@ def API_Email_Send():
 
 @app.post(f'{APP_PREFIX}/api/email/preview')
 def API_Email_PreviewBody():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     subject = str(data.get('Subject') or '')
     body = str(data.get('Body') or '')
     
     if ("ConfigurationName" not in data.keys() 
             or "Peer" not in data.keys() or data.get('ConfigurationName') not in WireguardConfigurations.keys()):
-        return ResponseObject(False, "Please specify configuration and peer")
+        return ResponseObject(False, "Please specify configuration and peer", status_code=400)
     
     configuration = WireguardConfigurations.get(data.get('ConfigurationName'))
     fp, p = configuration.searchPeer(data.get('Peer'))
@@ -2555,27 +2624,31 @@ def API_Clients_AllClientsRaw():
 
 @app.post(f'{APP_PREFIX}/api/clients/assignClient')
 def API_Clients_AssignClient():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     configurationName = data.get('ConfigurationName')
     id = data.get('Peer')
     client = data.get('ClientID')
     if not all([configurationName, id, client]):
-        return ResponseObject(False, "Please provide all required fields")
+        return ResponseObject(False, "Please provide all required fields", status_code=400)
     if not DashboardClients.GetClient(client):
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     
     status, data = DashboardClients.AssignClient(configurationName, id, client)
     if not status:
-        return ResponseObject(status, message="Client already assiged to this peer")
+        return ResponseObject(status, message="Client already assiged to this peer", status_code=400)
     
     return ResponseObject(data=data)
 
 @app.post(f'{APP_PREFIX}/api/clients/unassignClient')
 def API_Clients_UnassignClient():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     assignmentID = data.get('AssignmentID')
     if not assignmentID:
-        return ResponseObject(False, "Please provide AssignmentID")
+        return ResponseObject(False, "Please provide AssignmentID", status_code=400)
     return ResponseObject(status=DashboardClients.UnassignClient(assignmentID))
 
 @app.get(f'{APP_PREFIX}/api/clients/assignedClients')
@@ -2606,22 +2679,24 @@ def API_Clients_AssignedPeers():
     data = request.args
     clientId = data.get("ClientID")
     if not clientId:
-        return ResponseObject(False, "Please provide ClientID")
+        return ResponseObject(False, "Please provide ClientID", status_code=400)
     if not DashboardClients.GetClient(clientId):
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     d = DashboardClients.GetClientAssignedPeersGrouped(clientId)
     if d is None:
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     return ResponseObject(data=d)
 
 @app.post(f'{APP_PREFIX}/api/clients/generatePasswordResetLink')
 def API_Clients_GeneratePasswordResetLink():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     clientId = data.get("ClientID")
     if not clientId:
-        return ResponseObject(False, "Please provide ClientID")
+        return ResponseObject(False, "Please provide ClientID", status_code=400)
     if not DashboardClients.GetClient(clientId):
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     
     token = DashboardClients.GenerateClientPasswordResetToken(clientId)
     if token:
@@ -2630,24 +2705,28 @@ def API_Clients_GeneratePasswordResetLink():
 
 @app.post(f'{APP_PREFIX}/api/clients/updateProfileName')
 def API_Clients_UpdateProfile():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     clientId = data.get("ClientID")
     if not clientId:
-        return ResponseObject(False, "Please provide ClientID")
+        return ResponseObject(False, "Please provide ClientID", status_code=400)
     if not DashboardClients.GetClient(clientId):
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     
     value = data.get('Name')
     return ResponseObject(status=DashboardClients.UpdateClientProfile(clientId, value))
 
 @app.post(f'{APP_PREFIX}/api/clients/deleteClient')
 def API_Clients_DeleteClient():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     clientId = data.get("ClientID")
     if not clientId:
-        return ResponseObject(False, "Please provide ClientID")
+        return ResponseObject(False, "Please provide ClientID", status_code=400)
     if not DashboardClients.GetClient(clientId):
-        return ResponseObject(False, "Client does not exist")
+        return ResponseObject(False, "Client does not exist", status_code=404)
     return ResponseObject(status=DashboardClients.DeleteClient(clientId))   
 
 @app.get(f'{APP_PREFIX}/api/webHooks/getWebHooks')
@@ -2662,13 +2741,17 @@ def API_WebHooks_createWebHook():
 
 @app.post(f'{APP_PREFIX}/api/webHooks/updateWebHook')
 def API_WebHooks_UpdateWebHook():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     status, msg = DashboardWebHooks.UpdateWebHook(data)
     return ResponseObject(status, msg)
 
 @app.post(f'{APP_PREFIX}/api/webHooks/deleteWebHook')
 def API_WebHooks_DeleteWebHook():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return ResponseObject(False, "Invalid JSON body", status_code=400)
     status, msg = DashboardWebHooks.DeleteWebHook(data)
     return ResponseObject(status, msg)
 

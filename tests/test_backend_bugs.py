@@ -489,3 +489,60 @@ def test_bug21_update_configuration_settings_safe_fallback():
     # Safe get fallback in updateConfigurationSettings
     assert "sanitized_data = {}" in content
     assert "elif hasattr(self, key) and getattr(self, key) is not None:" in content
+
+
+def test_global_json_error_handlers():
+    from dashboard import app, DashboardConfig
+    client = app.test_client()
+
+    # 405 Method Not Allowed on API route should return JSON envelope
+    res = client.put("/api/validateAuthentication")
+    assert res.status_code == 405
+    assert res.is_json
+    data = res.get_json()
+    assert data["status"] is False
+    assert "Method Not Allowed" in data["message"]
+
+    # 404 on API route should return JSON envelope
+    epoch = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
+    with client.session_transaction() as sess:
+        sess["username"] = "test_token"
+        sess["role"] = "admin"
+        sess["session_epoch"] = epoch
+    client.set_cookie("authToken", "test_token", domain="localhost")
+
+    res = client.get("/api/nonexistent_route_test")
+    assert res.status_code == 404
+    assert res.is_json
+    data = res.get_json()
+    assert data["status"] is False
+    assert "API resource not found" in data["message"]
+
+
+def test_delete_peer_schedule_job_empty_payload_returns_400():
+    from dashboard import app, DashboardConfig
+    client = app.test_client()
+    epoch = str(DashboardConfig.GetConfig("Account", "session_epoch")[1] or "1")
+    with client.session_transaction() as sess:
+        sess["username"] = "test_token"
+        sess["role"] = "admin"
+        sess["session_epoch"] = epoch
+    client.set_cookie("authToken", "test_token", domain="localhost")
+
+    # Empty payload or non-dict should return 400 Bad Request, not crash with 500
+    res = client.post("/api/deletePeerScheduleJob", data="", content_type="application/json")
+    assert res.status_code == 400
+    assert res.is_json
+    data = res.get_json()
+    assert data["status"] is False
+    assert "Please specify job" in data["message"]
+
+
+def test_client_signout_allows_post():
+    src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "client.py"))
+    with open(src_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Client signout route accepts both GET and POST
+    assert 'methods=["GET", "POST"]' in content
+    assert 'ClientAPI_SignOut' in content

@@ -62,7 +62,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
             return ResponseObject(False, "Too many sign up attempts. Please try again in a minute.", status_code=429)
         if not dashboardConfig.GetConfig("Clients", "sign_up")[1]:
             abort(404)
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         status, msg = dashboardClients.SignUp(**data)
         return ResponseObject(status, msg)
 
@@ -83,7 +85,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         if not oidc:
             return ResponseObject(status=False, message="OIDC is disabled")
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         status, oidcData = dashboardClients.SignIn_OIDC(**data)
         if not status:
             return ResponseObject(status, oidcData)
@@ -99,7 +103,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         ip = request.remote_addr
         if client_limiter.check_rate_limit(f"signin_{ip}", limit=5, period=60):
             return ResponseObject(False, "Too many sign in attempts. Please try again in a minute.", status_code=429)
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         status, msg = dashboardClients.SignIn(**data)
         if status:
             session['Email'] = data.get('Email')
@@ -118,7 +124,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         if not emailSender.ready():
             return ResponseObject(False, "We can't send you an email due to your Administrator has not setup email service. Please contact your administrator.") 
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         email = data.get('Email', None)
         if not email:
             return ResponseObject(False, "Please provide a valid Email")
@@ -141,11 +149,13 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         ip = request.remote_addr
         if client_limiter.check_rate_limit(f"reset_validate_{ip}", limit=5, period=60):
             return ResponseObject(False, "Too many attempts. Please try again in a minute.", status_code=429)
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         email = data.get('Email', None)
         token = data.get('Token', None)
         if not all([email, token]):
-            return ResponseObject(False, "Please provide a valid Email")
+            return ResponseObject(False, "Please provide a valid Email and Token")
 
         u = dashboardClients.SignIn_UserExistence(email)
         if not u:
@@ -158,13 +168,15 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         ip = request.remote_addr
         if client_limiter.check_rate_limit(f"reset_pwd_{ip}", limit=5, period=60):
             return ResponseObject(False, "Too many attempts. Please try again in a minute.", status_code=429)
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         email = data.get('Email', None)
         token = data.get('Token', None)
         password = data.get('Password', None)
         confirmPassword = data.get('ConfirmPassword', None)
         if not all([email, token, password, confirmPassword]):
-            return ResponseObject(False, "Please provide a valid Email")
+            return ResponseObject(False, "Please provide all required fields")
 
         u = dashboardClients.SignIn_UserExistence(email)
         if not u:
@@ -180,7 +192,7 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         return ResponseObject(status, msg)
             
 
-    @client.get(f'{prefix}/api/signout')
+    @client.route(f'{prefix}/api/signout', methods=["GET", "POST"])
     def ClientAPI_SignOut():
         if session.get("SignInMethod") == "OIDC":
             dashboardClients.SignOut_OIDC()
@@ -201,7 +213,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
         ip = request.remote_addr
         if client_limiter.check_rate_limit(f"totp_{ip}", limit=5, period=60):
             return ResponseObject(False, "Too many TOTP attempts. Please try again in a minute.", status_code=429)
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         token = data.get('Token', None)
         userProvidedTotp = data.get('UserProvidedTOTP', None)
         if not all([token, userProvidedTotp]):
@@ -263,7 +277,9 @@ def createClientBlueprint(wireguardConfigurations: dict[WireguardConfiguration],
     @client.post(f'{prefix}/api/settings/updatePassword')
     @login_required
     def ClientAPI_Settings_UpdatePassword():
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return ResponseObject(False, "Invalid JSON body", status_code=400)
         status, message = dashboardClients.UpdateClientPassword(session['ClientID'], **data)
     
         return ResponseObject(status, message)       

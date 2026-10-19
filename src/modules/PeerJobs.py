@@ -366,6 +366,10 @@ class PeerJobs:
             self.deleteJob(j)
             
     def cleanJob(self, init = False):
+        # During __init__ the WireGuard configurations are not loaded yet, so no job can be
+        # proven stale here; runJob() calls cleanJob() again once they are.
+        if init:
+            return
         failingJobs = self.JobLogger.getFailingJobs()
         with self.engine.begin() as conn:
             for job in failingJobs:
@@ -381,11 +385,12 @@ class PeerJobs:
                 action = job_detail.get('Action')
 
                 conf = self.WireguardConfigurations.get(conf_name)
-                peer_exists = False
-                if conf:
-                    f, _ = conf.searchPeer(peer_id)
-                    if f:
-                        peer_exists = True
+                if conf is None:
+                    # An interface that is not loaded (e.g. right after a restore or a server
+                    # migration) is not evidence that the peer was deleted; keep the job.
+                    continue
+                f, _ = conf.searchPeer(peer_id)
+                peer_exists = bool(f)
 
                 # BUG-05: Never auto-delete active restriction jobs for existing peers
                 if action == "restrict" and peer_exists:

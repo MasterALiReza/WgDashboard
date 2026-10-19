@@ -2159,6 +2159,9 @@ def API_getDashboardTheme():
 def API_getDashboardVersion():
     return ResponseObject(data=DashboardConfig.GetConfig("Server", "version")[1])
 
+JOB_OPERATOR_ALIASES = {">": "lgt", "<": "lst", "==": "eq", "!=": "neq"}
+VALID_JOB_OPERATORS = {"lgt", "lst", "eq", "neq", ">=", "<=", "str_eq"}
+
 @app.post(f'{APP_PREFIX}/api/savePeerScheduleJob')
 def API_savePeerScheduleJob():
     data = request.get_json(silent=True) or {}
@@ -2170,13 +2173,15 @@ def API_savePeerScheduleJob():
     
     # BUG-02: Validate Job parameters
     field = job.get('Field')
-    operator = job.get('Operator')
+    # The admin UI and the OxBot/Mirza bot send the legacy operator names ("lgt", "lst", ...).
+    # Symbolic aliases are normalized to them so stored jobs keep rendering in the UI dropdown.
+    operator = JOB_OPERATOR_ALIASES.get(job.get('Operator'), job.get('Operator'))
     action = job.get('Action')
     val = job.get('Value')
 
     if field not in ["total_receive", "total_sent", "total_data", "date"]:
         return ResponseObject(False, f"Invalid Job Field: {field}", status_code=400)
-    if operator not in [">", "<", ">=", "<=", "==", "str_eq"]:
+    if operator not in VALID_JOB_OPERATORS:
         return ResponseObject(False, f"Invalid Job Operator: {operator}", status_code=400)
     if action not in ["restrict", "delete", "reset_total_data_usage"]:
         return ResponseObject(False, f"Invalid Job Action: {action}", status_code=400)
@@ -2211,7 +2216,7 @@ def API_savePeerScheduleJob():
         job.get('Configuration'),
         job.get('Peer'),
         job.get('Field'),
-        job.get('Operator'),
+        operator,
         job.get('Value'),
         job.get('CreationDate') or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         job.get('ExpireDate'),

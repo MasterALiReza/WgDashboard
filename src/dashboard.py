@@ -2224,7 +2224,8 @@ def API_savePeerScheduleJob():
     ))
     if s:
         return ResponseObject(s, data=p)
-    return ResponseObject(s, message=p)
+    # A non-2xx code lets API clients (the bots) see that the limit was not stored
+    return ResponseObject(s, message=p, status_code=500)
 
 @app.post(f'{APP_PREFIX}/api/deletePeerScheduleJob')
 def API_deletePeerScheduleJob():
@@ -3090,23 +3091,15 @@ def API_v2_renewPeer():
             except Exception:
                 pass
 
+        # The old limit jobs are removed only after the new ones were saved, so a failure never leaves the peer unlimited
         existing_jobs = AllPeerJobs.searchJob(config_name, peer.id)
-        for ej in existing_jobs:
-            if ej.Field in ("total_data", "total_receive", "total_sent", "date"):
-                AllPeerJobs.deleteJob(ej)
-
+        new_jobs = []
         data_limit_gb = data.get('data_limit_gb')
         if data_limit_gb is not None:
             try:
                 val_num = float(data_limit_gb)
                 if val_num > 0:
-                    pj = PeerJob(
-                        str(uuid.uuid4()), config_name, peer.id,
-                        "total_data", ">=", str(val_num),
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        None, "restrict"
-                    )
-                    AllPeerJobs.saveJob(pj)
+                    new_jobs.append(("total_data", str(val_num)))
             except (ValueError, TypeError):
                 pass
 
@@ -3114,15 +3107,20 @@ def API_v2_renewPeer():
         if expire_at:
             try:
                 _parse_job_datetime(str(expire_at))
-                pj = PeerJob(
-                    str(uuid.uuid4()), config_name, peer.id,
-                    "date", ">=", str(expire_at),
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    None, "restrict"
-                )
-                AllPeerJobs.saveJob(pj)
+                new_jobs.append(("date", str(expire_at)))
             except (ValueError, TypeError):
                 pass
+
+        for field, value in new_jobs:
+            saved, msg = AllPeerJobs.saveJob(PeerJob(
+                str(uuid.uuid4()), config_name, peer.id, field, ">=", value,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), None, "restrict"
+            ))
+            if not saved:
+                return ResponseObject(False, f"Failed to save the {field} limit: {msg}", status_code=500)
+        for ej in existing_jobs:
+            if ej.Field in ("total_data", "total_receive", "total_sent", "date"):
+                AllPeerJobs.deleteJob(ej)
 
         if is_restricted:
             config.allowAccessPeers([peer.id], force=True)
@@ -3172,15 +3170,18 @@ def API_v2_peerLimits():
                 if add_vol > 0:
                     base_limit = float(existing_vol_job.Value) if existing_vol_job else current_usage
                     new_limit = max(base_limit, current_usage) + add_vol
-                    if existing_vol_job:
-                        AllPeerJobs.deleteJob(existing_vol_job)
                     pj = PeerJob(
                         str(uuid.uuid4()), config_name, peer.id,
                         "total_data", ">=", str(round(new_limit, 4)),
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         None, "restrict"
                     )
-                    AllPeerJobs.saveJob(pj)
+                    # The new limit is saved before the old one is removed so the peer is never left unlimited
+                    saved, _ = AllPeerJobs.saveJob(pj)
+                    if saved:
+                        if existing_vol_job:
+                            AllPeerJobs.deleteJob(existing_vol_job)
+                        existing_vol_job = pj
                     if is_restricted and getattr(peer, 'restricted_reason', '') == "Volume Limit Reached":
                         unrestrict_needed = True
             except (ValueError, TypeError):
@@ -3191,15 +3192,15 @@ def API_v2_peerLimits():
             try:
                 set_limit = float(data_limit_gb)
                 if set_limit > 0:
-                    if existing_vol_job:
-                        AllPeerJobs.deleteJob(existing_vol_job)
                     pj = PeerJob(
                         str(uuid.uuid4()), config_name, peer.id,
                         "total_data", ">=", str(round(set_limit, 4)),
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         None, "restrict"
                     )
-                    AllPeerJobs.saveJob(pj)
+                    saved, _ = AllPeerJobs.saveJob(pj)
+                    if saved and existing_vol_job:
+                        AllPeerJobs.deleteJob(existing_vol_job)
                     if set_limit > current_usage and is_restricted and getattr(peer, 'restricted_reason', '') == "Volume Limit Reached":
                         unrestrict_needed = True
             except (ValueError, TypeError):
@@ -3213,22 +3214,27 @@ def API_v2_peerLimits():
                     base_dt = datetime.now(timezone.utc)
                     if existing_date_job:
                         try:
-                            edt, _ = _parse_job_datetime(existing_date_job.Value)
+                            edt, is_aware = _parse_job_datetime(existing_date_job.Value)
+                            if not is_aware:
+                                # A value without offset is in the panel server's local time
+                                edt = edt.astimezone(timezone.utc)
                             if edt > base_dt:
                                 base_dt = edt
                         except Exception:
                             pass
                     new_dt = base_dt + timedelta(days=days_num)
-                    new_dt_str = new_dt.strftime("%Y-%m-%d %H:%M:%S")
-                    if existing_date_job:
-                        AllPeerJobs.deleteJob(existing_date_job)
+                    # Stored with its UTC offset so the job fires at the same instant whatever the server timezone
+                    new_dt_str = new_dt.isoformat(timespec="seconds")
                     pj = PeerJob(
                         str(uuid.uuid4()), config_name, peer.id,
                         "date", ">=", new_dt_str,
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         None, "restrict"
                     )
-                    AllPeerJobs.saveJob(pj)
+                    # The new expiry is saved before the old one is removed so the peer is never left without one
+                    saved, _ = AllPeerJobs.saveJob(pj)
+                    if saved and existing_date_job:
+                        AllPeerJobs.deleteJob(existing_date_job)
                     if is_restricted and getattr(peer, 'restricted_reason', '') == "Time Limit Reached":
                         unrestrict_needed = True
             except (ValueError, TypeError):

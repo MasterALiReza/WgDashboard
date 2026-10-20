@@ -88,6 +88,24 @@ class TestSavePeerScheduleJobOperators:
         assert res.status_code == 200, res.get_json()
         assert save.call_args[0][0].Operator == stored
 
+    def test_failed_save_returns_error_status(self, api_auth, wg0_with_peer):
+        # The bots treat HTTP 200 as "limit stored"; a failed save must not look like success
+        from dashboard import app, AllPeerJobs
+        with patch.object(AllPeerJobs, "saveJob", return_value=(False, "database is locked")):
+            res = app.test_client().post("/api/savePeerScheduleJob",
+                                         json=_bot_job(wg0_with_peer, "total_data", "10"), headers=api_auth)
+        assert res.status_code == 500
+        assert res.get_json()["status"] is False
+
+    @pytest.mark.parametrize("value", ["2026-11-19T20:30:00+03:30", "2026-11-19T17:00:00+00:00", "1763571000"])
+    def test_bot_date_with_offset_is_accepted(self, api_auth, wg0_with_peer, value):
+        from dashboard import app, AllPeerJobs
+        with patch.object(AllPeerJobs, "saveJob", return_value=(True, [])) as save:
+            res = app.test_client().post("/api/savePeerScheduleJob",
+                                         json=_bot_job(wg0_with_peer, "date", value), headers=api_auth)
+        assert res.status_code == 200, res.get_json()
+        assert save.call_args[0][0].Value == value
+
     @pytest.mark.parametrize("operator", ["foo", "", None, "gt"])
     def test_unknown_operator_is_rejected(self, api_auth, wg0_with_peer, operator):
         from dashboard import app, AllPeerJobs
@@ -96,6 +114,44 @@ class TestSavePeerScheduleJobOperators:
                                          json=_bot_job(wg0_with_peer, "total_data", "10", operator), headers=api_auth)
         assert res.status_code == 400
         assert not save.called
+
+
+class TestJobDateTimezones:
+    def test_offset_dates_compare_in_utc(self):
+        from modules.PeerJobs import _parse_job_datetime
+        from datetime import timezone
+        tehran, aware1 = _parse_job_datetime("2026-11-19T20:30:00+03:30")
+        utc, aware2 = _parse_job_datetime("2026-11-19T17:00:00+00:00")
+        assert aware1 and aware2
+        assert tehran == utc
+        assert tehran.tzinfo == timezone.utc
+
+    def test_v2_add_days_extends_from_existing_expiry_and_keeps_offset(self, api_auth, wg0_with_peer):
+        from dashboard import app, AllPeerJobs
+        from datetime import datetime, timezone, timedelta
+        existing = PeerJob("old-date", "wg0", wg0_with_peer, "date", "lgt",
+                           "2030-01-01T00:00:00+00:00", datetime.now(), None, "restrict")
+        with patch.object(AllPeerJobs, "searchJob", return_value=[existing]), \
+             patch.object(AllPeerJobs, "saveJob", return_value=(True, [])) as save, \
+             patch.object(AllPeerJobs, "deleteJob", return_value=(True, None)) as delete:
+            res = app.test_client().post("/api/v2/peer/limits/add", headers=api_auth,
+                                         json={"configurationName": "wg0", "id": wg0_with_peer, "add_days": 10})
+        assert res.status_code == 200, res.get_json()
+        saved = save.call_args[0][0]
+        assert datetime.fromisoformat(saved.Value) == datetime(2030, 1, 11, tzinfo=timezone.utc)
+        assert delete.called
+
+    def test_v2_add_days_keeps_old_job_when_save_fails(self, api_auth, wg0_with_peer):
+        from dashboard import app, AllPeerJobs
+        from datetime import datetime
+        existing = PeerJob("old-date", "wg0", wg0_with_peer, "date", "lgt",
+                           "2030-01-01 00:00:00", datetime.now(), None, "restrict")
+        with patch.object(AllPeerJobs, "searchJob", return_value=[existing]), \
+             patch.object(AllPeerJobs, "saveJob", return_value=(False, "locked")), \
+             patch.object(AllPeerJobs, "deleteJob", return_value=(True, None)) as delete:
+            app.test_client().post("/api/v2/peer/limits/add", headers=api_auth,
+                                   json={"configurationName": "wg0", "id": wg0_with_peer, "add_days": 10})
+        assert not delete.called
 
 
 def _peer_jobs_with_failing_restrict_job(configurations):

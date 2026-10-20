@@ -138,6 +138,20 @@ class TestConfigurationInfoServesLiveJobs:
         assert [j["JobID"] for j in jobs] == ["j1"]
 
 
+class TestApiResponsesAreNeverCached:
+    @pytest.mark.parametrize("path", ["/api/getWireguardConfigurationInfo?configurationName=wg0", "/api/getDashboardVersion"])
+    def test_api_responses_forbid_proxy_caching(self, api_auth, path):
+        from dashboard import app
+        res = app.test_client().get(path, headers=api_auth)
+        assert res.headers.get("X-Accel-Expires") == "0"
+        assert "no-store" in res.headers.get("Cache-Control", "")
+
+    def test_unauthenticated_response_also_not_cacheable(self):
+        from dashboard import app
+        res = app.test_client().get("/api/getWireguardConfigurationInfo?configurationName=wg0")
+        assert res.headers.get("X-Accel-Expires") == "0"
+
+
 class TestJobDateTimezones:
     def test_offset_dates_compare_in_utc(self):
         from modules.PeerJobs import _parse_job_datetime

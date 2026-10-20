@@ -598,6 +598,17 @@ def extract_target_configuration() -> str | None:
 API Routes
 '''
 
+@app.after_request
+def no_store_api_responses(response):
+    # API responses carry peer private keys and must reflect job changes immediately. A reverse proxy cache keyed
+    # only on the URL (seen in production nginx configs) served one client's authenticated response to requests
+    # without an API key. X-Accel-Expires is honoured by nginx even when it is told to ignore Cache-Control.
+    if request.path.startswith(f'{APP_PREFIX}/api/') or request.path.startswith(f'{APP_PREFIX}/client/api/'):
+        response.headers['Cache-Control'] = 'no-store, private'
+        response.headers['X-Accel-Expires'] = '0'
+        response.headers['Pragma'] = 'no-cache'
+    return response
+
 @app.before_request
 def auth_req():
     if request.method.lower() == 'options':

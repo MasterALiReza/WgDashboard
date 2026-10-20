@@ -2015,6 +2015,11 @@ def API_getConfigurationInfo():
         active_peers = [p for p in active_peers if p.id == p_clean or p.id == peer_id or getattr(p, 'name', '') == peer_id]
         restricted_peers = [p for p in restricted_peers if p.id == p_clean or p.id == peer_id or getattr(p, 'name', '') == peer_id]
 
+    # Peer objects only pick up job changes on the next background refresh; the bots read the jobs right after
+    # saving or deleting one (e.g. a renewal straight after a purchase), so serve them from the live job index.
+    for p in active_peers + restricted_peers:
+        p.jobs = AllPeerJobs.searchJob(config.Name, p.id)
+
     return ResponseObject(data={
         "configurationInfo": config.toJson(),
         "configurationPeers": active_peers,

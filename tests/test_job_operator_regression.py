@@ -116,6 +116,28 @@ class TestSavePeerScheduleJobOperators:
         assert not save.called
 
 
+class TestConfigurationInfoServesLiveJobs:
+    def test_jobs_come_from_job_index_not_stale_peer_object(self, api_auth):
+        # A bot renewal reads the jobs right after a purchase saved them; a cached Peer object must not hide them
+        from dashboard import app, AllPeerJobs, WireguardConfigurations
+        from modules.Peer import Peer
+        from datetime import datetime
+        _, pub = GenerateWireguardPublicKey(GenerateWireguardPrivateKey()[1])
+        conf = MagicMock()
+        conf.Name = "wg0"
+        conf.toJson.return_value = {"Name": "wg0"}
+        stale = Peer.__new__(Peer)
+        stale.__dict__.update({"id": pub, "name": "u1", "jobs": [], "restricted": False})
+        conf.Peers = [stale]
+        conf.getRestrictedPeersList.return_value = []
+        job = PeerJob("j1", "wg0", pub, "date", "lgt", "2099-01-01T00:00:00+03:30", datetime.now(), None, "restrict")
+        with patch.dict(WireguardConfigurations, {"wg0": conf}), \
+             patch.object(AllPeerJobs, "searchJob", return_value=[job]):
+            res = app.test_client().get("/api/getWireguardConfigurationInfo?configurationName=wg0", headers=api_auth)
+        jobs = res.get_json()["data"]["configurationPeers"][0]["jobs"]
+        assert [j["JobID"] for j in jobs] == ["j1"]
+
+
 class TestJobDateTimezones:
     def test_offset_dates_compare_in_utc(self):
         from modules.PeerJobs import _parse_job_datetime

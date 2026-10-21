@@ -75,3 +75,10 @@ scratch/
 test_backup_restore.py
 test_wgd_restart.py
 ssh-mcp-server/
+# Scratch / debug leftovers
+scratch/
+graphify-out/
+error_log*
+*.bak*
+*.sqlite
+.pytest_cache/

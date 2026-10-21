@@ -41,7 +41,7 @@ export default {
 	},
 	mounted() {
 		if(this.peerConfiguration){
-			QRCode.toCanvas(document.querySelector("#qrcode"), this.peerConfiguration.file,  (error) => {
+			QRCode.toCanvas(document.querySelector("#qrcode"), this.peerConfiguration.file, {errorCorrectionLevel: "L", margin: 4, scale: 6}, (error) => {
 				if (error) console.error(error)
 			})
 		}

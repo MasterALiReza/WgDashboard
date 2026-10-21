@@ -3,6 +3,11 @@ import QRCode from "qrcode";
 import LocaleText from "@/components/text/localeText.vue";
 import {fetchGet} from "@/utilities/fetch.js";
 import {DashboardConfigurationStore} from "@/stores/DashboardConfigurationStore.js";
+
+// Render at a large integer scale and let CSS shrink it with pixelated sampling,
+// so modules stay sharp; full 4-module quiet zone for reliable camera scans.
+const QR_OPTIONS = {errorCorrectionLevel: "L", margin: 4, scale: 10};
+
 export default {
 	name: "peerQRCode",
 	components: {LocaleText},
@@ -49,13 +54,13 @@ export default {
 						};
 					}
 					QRCode.toCanvas(
-						document.querySelector("#awg_vpn_qrcode"), btoa(unescape(encodeURIComponent(JSON.stringify(awgQRCodeObject)))), (error) => {
+						document.querySelector("#awg_vpn_qrcode"), btoa(unescape(encodeURIComponent(JSON.stringify(awgQRCodeObject)))), QR_OPTIONS, (error) => {
 							if (error) console.error(error)
 						}
 					)
 				}
 				data = res.data.file
-				QRCode.toCanvas(document.querySelector("#qrcode"), data,  (error) => {
+				QRCode.toCanvas(document.querySelector("#qrcode"), data, QR_OPTIONS, (error) => {
 					if (error) console.error(error)
 				})
 			}else{
@@ -81,7 +86,6 @@ export default {
 						<div class="d-flex gap-2 flex-column">
 							<div class="d-flex flex-column gap-2 align-items-center">
 								<canvas id="qrcode"
-										style="width: 200px !important; height: 200px !important;"
 										class="rounded-3 shadow animate__animated animate__fadeIn animate__faster qrcode"
 										:class="{'d-none': loading}"></canvas>
 								<LocaleText t="Scan with WireGuard App" class="text-muted" v-if='this.selectedPeer.configuration.Protocol === "wg"'></LocaleText>
@@ -104,16 +108,18 @@ export default {
 </template>
 
 <style scoped>
+.qrcode{
+	width: 320px !important;
+	height: 320px !important;
+	image-rendering: pixelated;
+	background: #fff;
+}
+
 @media screen and (max-width: 768px) {
 	.qrcode{
 		width: 100% !important;
 		height: auto !important;
 		aspect-ratio: 1/1;
 	}
-}
-
-.qrcode{
-	width: 200px !important;
-	height: 200px !important;
 }
 </style>

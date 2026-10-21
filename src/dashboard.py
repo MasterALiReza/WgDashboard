@@ -3045,7 +3045,7 @@ def API_v2_createPeer():
         qr_b64 = None
         if HAS_QRCODE and config_file_text:
             try:
-                qr = qrcode.QRCode(box_size=10, border=2)
+                qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
                 qr.add_data(config_file_text)
                 qr.make(fit=True)
                 img = qr.make_image(fill_color="black", back_color="white")

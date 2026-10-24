@@ -840,6 +840,12 @@ class WireguardConfiguration:
                                     except Exception:
                                         pass
                     except Exception as kernel_err:
+                        # Include wg's own message (e.g. "fopen: Permission denied"), not just the exit status
+                        wg_output = getattr(kernel_err, "output", None)
+                        if isinstance(wg_output, bytes):
+                            wg_output = wg_output.decode("utf-8", "replace")
+                        if wg_output and wg_output.strip():
+                            kernel_err = f"{kernel_err}: {wg_output.strip()}"
                         _logger.error(f"Kernel apply error during addPeers: {kernel_err}")
                         for applied_id in applied_keys_to_kernel:
                             try:

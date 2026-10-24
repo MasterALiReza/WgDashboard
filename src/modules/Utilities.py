@@ -269,8 +269,16 @@ class ProcessLock:
 
 
 def write_psk_tmp(psk: str) -> str:
-    """Safely write pre-shared key (PSK) to an atomic temp file with 0600 permissions (SEC-10)."""
-    tmp_dir = "/run" if os.path.exists("/run") and os.path.isdir("/run") else None
+    """Safely write pre-shared key (PSK) to an atomic temp file with 0600 permissions (SEC-10).
+
+    The file lives in /etc/wireguard when possible: Ubuntu 26.04's AppArmor profile for `wg` only lets it
+    read /etc/wireguard/**, so a key file in /run made every `wg set ... preshared-key` fail
+    ("fopen: Permission denied")."""
+    tmp_dir = None
+    for candidate in ("/etc/wireguard", "/run"):
+        if os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+            tmp_dir = candidate
+            break
     fd, path = tempfile.mkstemp(prefix="wgd_psk_", dir=tmp_dir)
     try:
         os.chmod(path, 0o600)

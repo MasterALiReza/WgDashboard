@@ -61,7 +61,9 @@ class Peer:
         self.remote_endpoint = tableData.get("remote_endpoint", "")
         self.preshared_key = tableData.get("preshared_key", "")
         self.restricted_reason = tableData.get("restricted_reason", "")
-        self.restricted = bool(tableData.get("restricted", False) or self.restricted_reason)
+        # Only the restricted table makes a peer restricted (getRestrictedPeers sets the flag). A reason left on a
+        # row in the main table, e.g. after allowAccessPeers, must not hide an active peer from the API.
+        self.restricted = bool(tableData.get("restricted", False))
         self.getJobs()
         self.getShareLink()
 

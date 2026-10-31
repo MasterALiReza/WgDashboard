@@ -207,6 +207,16 @@ class WireguardConfiguration:
 
     def __initPeersList(self):
         self.Peers: list[Peer] = []
+        # Peers allowed back before the fix in allowAccessPeers kept their restricted_reason in the main table
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    self.peersTable.update().where(
+                        self.peersTable.columns.restricted_reason.isnot(None)
+                    ).values(restricted_reason=None)
+                )
+        except Exception as e:
+            _logger.error(f"{self.Name} clearing stale restricted_reason failed: {e}")
         self.getPeers()
         self.getRestrictedPeersList()
 
@@ -998,6 +1008,11 @@ class WireguardConfiguration:
                             [c.name for c in self.peersTable.columns],
                             stmt
                         )
+                    )
+                    conn.execute(
+                        self.peersTable.update().where(
+                            self.peersTable.columns.id == peer_id
+                        ).values(restricted_reason=None)
                     )
                     conn.execute(
                         self.peersRestrictedTable.delete().where(
